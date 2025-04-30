@@ -17,6 +17,7 @@ fi
 echo "📂 Criando diretórios em /opt/minecraft..."
 sudo mkdir -p /opt/minecraft/src
 sudo mkdir -p /opt/minecraft/logs
+sudo mkdir -p /opt/minecraft/backups
 sudo mkdir -p /opt/minecraft/bot
 
 # Instala tmux e Java 21 se necessário
@@ -70,10 +71,26 @@ else
     echo "✅ python-dotenv já instalado."
 fi
 
+# Verificar e instalar requests se necessário
+if ! pip3 show requests &> /dev/null; then
+    echo "🛠️ Instalando requests..."
+    pip3 install requests
+else
+    echo "✅ requests já instalado."
+fi
+
 
 # Copia arquivos de configuração do Minecraft
 echo "📄 Copiando arquivos de configuração..."
-sudo cp "$SCRIPT_DIR/.env" /opt/minecraft/src/.env
+
+# Verifica se o .env já existe, e só copia se não existir
+if [ ! -f "/opt/minecraft/src/.env" ]; then
+    sudo cp "$SCRIPT_DIR/.env" /opt/minecraft/src/.env
+    echo "✅ .env copiado."
+else
+    echo "⚠️ .env já existe. Não foi copiado."
+fi
+
 sudo cp "$SCRIPT_DIR/configs/eula.txt" /opt/minecraft/src/eula.txt
 sudo cp "$SCRIPT_DIR/configs/server.properties" /opt/minecraft/src/server.properties
 
@@ -184,14 +201,40 @@ fi
 echo "▶️ Iniciando ou reiniciando serviço de monitoramento..."
 sudo systemctl restart minecraft-discord.service
 
-
-
 # Copia o script check_players.sh para o diretório correto
 echo "📄 Copiando script check_players.sh..."
 sudo cp "$SCRIPT_DIR/check_players.sh" /opt/minecraft/src/check_players.sh
 
 # Torna o script check_players.sh executável
 chmod +x /opt/minecraft/src/check_players.sh
+
+# Copia o script backup.py para o diretório correto
+echo "📄 Copiando script backup.py..."
+sudo cp "$SCRIPT_DIR/backup.py" /opt/minecraft/src/backup.py
+
+# Torna o script backup.py executável
+chmod +x /opt/minecraft/src/backup.py
+
+# Adiciona a tarefa no cron para executar o backup a cada 3 horas
+echo "📅 Adicionando cron job para executar backup.py a cada 3 horas..."
+CRON_FILE="/etc/cron.d/minecraft-backup"
+
+# Cria o arquivo de cron se ele não existir
+if [ ! -f "$CRON_FILE" ]; then
+    sudo touch "$CRON_FILE"
+    echo "0 */3 * * * root /usr/bin/python3 /opt/minecraft/src/backup.py" | sudo tee "$CRON_FILE"
+    echo "✅ Cron job para backup adicionado com sucesso."
+else
+    echo "✅ Cron job já existe em $CRON_FILE. Pulando criação."
+fi
+
+# Verifica se o cron está funcionando corretamente
+echo "🔄 Atualizando cron..."
+sudo systemctl restart cron
+
+# Verifica a lista de cron jobs
+echo "🔍 Verificando cron jobs..."
+sudo cat "$CRON_FILE"
 
 # **Adiciona o serviço de verificação de jogadores não permitidos (check_players.sh)**
 echo "📄 Criando serviço systemd para verificação de jogadores..."
