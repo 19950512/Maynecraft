@@ -79,6 +79,14 @@ else
     echo "✅ requests já instalado."
 fi
 
+# Verificar e instalar boto3 se necessário
+if ! pip3 show boto3 &> /dev/null; then
+    echo "🛠️ Instalando boto3..."
+    pip3 install boto3
+else
+    echo "✅ boto3 já instalado."
+fi
+
 
 # Copia arquivos de configuração do Minecraft
 echo "📄 Copiando arquivos de configuração..."
