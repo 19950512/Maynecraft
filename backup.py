@@ -75,7 +75,8 @@ def upload_to_r2(file_name, file_path):
         aws_access_key_id=R2_ACCESS_KEY,
         aws_secret_access_key=R2_SECRET_KEY,
         endpoint_url=R2_ENDPOINT_URL,
-        config=Config(signature_version='s3v4')
+        config=Config(signature_version='s3v4'),
+        region_name='auto'  # <- ESSENCIAL
     )
 
     s3.upload_file(file_path, R2_BUCKET_NAME, file_name)
