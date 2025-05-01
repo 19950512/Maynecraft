@@ -126,6 +126,9 @@ else
     echo "✅ Jogador '19950512' já está na lista de jogadores permitidos."
 fi
 
+# Adiciona o IP "
+echo "" >> "/opt/minecraft/src/allowed_ips.txt"
+
 # Copia o código do bot para o diretório correto
 echo "📄 Copiando bot Python..."
 sudo cp "$SCRIPT_DIR/bot.py" /opt/minecraft/bot/bot.py

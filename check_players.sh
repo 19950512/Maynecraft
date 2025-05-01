@@ -3,8 +3,12 @@
 SESSION_NAME="minecraft"
 SERVER_DIR="/opt/minecraft/src"
 ALLOWED_PLAYERS_FILE="$SERVER_DIR/allowed_players.txt"
+ALLOWED_IPS_FILE="$SERVER_DIR/allowed_ips.txt"
+TMP_PLAYER_IPS="/tmp/current_players_ips.txt"
 
-# Verifica se o arquivo de jogadores permitidos existe
+mkdir -p /tmp
+> "$TMP_PLAYER_IPS"
+
 if [ ! -f "$ALLOWED_PLAYERS_FILE" ]; then
     echo "❌ Arquivo de jogadores permitidos não encontrado. Criando novo arquivo..."
     touch "$ALLOWED_PLAYERS_FILE"
@@ -12,24 +16,31 @@ if [ ! -f "$ALLOWED_PLAYERS_FILE" ]; then
     exit 1
 fi
 
-# Função para verificar e kickar jogadores não permitidos
+if [ ! -f "$ALLOWED_IPS_FILE" ]; then
+    touch "$ALLOWED_IPS_FILE"
+fi
+
 check_players() {
-    # Captura o log da última parte da sessão tmux
-    tmux capture-pane -t "$SESSION_NAME" -pS -5 | grep "joined the game" | while read line; do
-        # Extrai o nome do jogador usando awk
-        player=$(echo "$line" | awk -F" " '{print $4}')
-        
-        # Verifica se o jogador está na lista de permitidos
-        if ! grep -q "^$player$" "$ALLOWED_PLAYERS_FILE"; then
-            echo "⚠️ Jogador $player não está na lista. Kickando..."
-            # Envia o comando para kickar o jogador
-            sudo tmux send-keys -t "$SESSION_NAME" "kick $player Jogador não permitido" C-m
+    # Lê os últimos 150 registros e salva IPs e jogadores temporariamente
+    tmux capture-pane -t "$SESSION_NAME" -pS -150 | while read line; do
+        if echo "$line" | grep -q "joined the game"; then
+            player=$(echo "$line" | awk -F" " '{print $4}')
+            # Verifica se está permitido
+            if ! grep -q "^$player$" "$ALLOWED_PLAYERS_FILE"; then
+                echo "⚠️ Jogador $player não está na lista. Kickando..."
+                sudo tmux send-keys -t "$SESSION_NAME" "kick $player Jogador não permitido" C-m
+            fi
+        elif echo "$line" | grep -q "logged in with entity id"; then
+            player=$(echo "$line" | grep -oP "\]: \K.*(?=\[)")
+            ip=$(echo "$line" | grep -oP "(/[\d\.]+)" | tr -d '/')
+            if [ -n "$player" ] && [ -n "$ip" ]; then
+                echo "$player $ip" >> "$TMP_PLAYER_IPS"
+            fi
         fi
     done
 }
 
-# Monitoramento contínuo de jogadores
 while true; do
     check_players
-    sleep 2  # Verifica a cada 2 segundos
+    sleep 1
 done

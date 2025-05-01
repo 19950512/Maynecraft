@@ -1,21 +1,30 @@
 #!/bin/bash
 
-# Caminho onde este script está
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_FILE="/opt/minecraft/src/logs/latest.log"
 
-# Carrega variáveis do arquivo .env
+# Load .env
 if [ -f "$SCRIPT_DIR/src/.env" ]; then
     export $(grep -v '^#' "$SCRIPT_DIR/src/.env" | xargs)
 else
-    echo "❌ Arquivo .env não encontrado em $SCRIPT_DIR. Abortando."
+    echo "❌ Arquivo .env não encontrado. Abortando."
     exit 1
 fi
 
-LOG_FILE="/opt/minecraft/src/logs/latest.log"
 WEBHOOK_URL="$DISCORD_WEBHOOK_URL"
+KNOWN_LOGINS="/tmp/known_logins.txt"
+> "$KNOWN_LOGINS"
 
 tail -n0 -F "$LOG_FILE" | while read LINE; do
-    if echo "$LINE" | grep -q "joined the game"; then
+    if echo "$LINE" | grep -q "logged in with entity id"; then
+        PLAYER=$(echo "$LINE" | grep -oP "\]: \K.*(?=\[)")
+        IP=$(echo "$LINE" | grep -oP "(/[\d\.]+)" | tr -d '/')
+        UNIQUE="$PLAYER-$IP"
+        if ! grep -q "$UNIQUE" "$KNOWN_LOGINS"; then
+            echo "$UNIQUE" >> "$KNOWN_LOGINS"
+            curl -s -H "Content-Type: application/json" -X POST -d "{\"content\": \"🔓 **$PLAYER entrou no servidor com IP $IP**\"}" "$WEBHOOK_URL"
+        fi
+    elif echo "$LINE" | grep -q "joined the game"; then
         PLAYER=$(echo "$LINE" | grep -oP "\]: \K.*(?= joined the game)")
         curl -s -H "Content-Type: application/json" -X POST -d "{\"content\": \"🟢 **$PLAYER entrou no servidor.**\"}" "$WEBHOOK_URL"
     elif echo "$LINE" | grep -q "left the game"; then
