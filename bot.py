@@ -39,6 +39,27 @@ async def players(ctx):
     await ctx.send(f"👥 {response}")
 
 @bot.command()
+async def comandos(ctx):
+    msg = (
+        "**📜 Lista de Comandos Disponíveis**\n\n"
+        "**👥 Informações de Jogadores**\n"
+        "`!players` — Mostra os jogadores online\n"
+        "`!estatisticas <jogador>` — Exibe estatísticas detalhadas\n"
+        "`!rank <objetivo>` — Exibe o ranking de um objetivo\n\n"
+        "**📊 Objetivos de Rank disponíveis:**\n"
+        "`mortes` — Total de vezes que o jogador morreu\n"
+        "`kills` — Jogadores assassinados (PvP)\n"
+        "`mobkills` — Criaturas abatidas (PvE)\n"
+        "`jumps` — Quantidade de pulos\n"
+        "`joins` — Quantidade de vezes que o jogador saiu do jogo\n\n"
+        "**🔧 Administração (Operador do Nether)**\n"
+        "`!addplayer <jogador>` — Adiciona jogador à whitelist\n"
+        "`!rank <objetivo>` — Mostra ranking de mortes, kills, pulos, etc.\n\n"
+    )
+
+    await ctx.send(msg)
+
+@bot.command()
 async def estatisticas(ctx, player_name: str):
     
     role_required = "Operador do Nether"
