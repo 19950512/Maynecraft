@@ -50,17 +50,33 @@ EOF
     curl -s -X POST -H "Content-Type: application/json" -d "$json" "$WEBHOOK_URL" > /dev/null
 }
 
+# Limpar entradas antigas de IPs no cache (mais de 1 hora, 3600 segundos)
+clean_old_cache() {
+    current_time=$(date +%s)
+    temp_file=$(mktemp)
+
+    while read player ip timestamp; do
+        if [ $((current_time - timestamp)) -lt 3600 ]; then
+            echo "$player $ip $timestamp" >> "$temp_file"
+        fi
+    done < "$TMP_PLAYER_IPS"
+
+    mv "$temp_file" "$TMP_PLAYER_IPS"
+}
+
 check_players() {
     tmux capture-pane -t "$SESSION_NAME" -pS -150 | while read line; do
         if echo "$line" | grep -q "logged in with entity id"; then
             player=$(echo "$line" | grep -oP "\]: \K.*(?=\[)")
             ip=$(echo "$line" | grep -oP "(/[\d\.]+)" | tr -d '/')
             if [ -n "$player" ] && [ -n "$ip" ]; then
-                echo "$player $ip" >> "$TMP_PLAYER_IPS"
+                timestamp=$(date +%s)  # Marca o tempo do IP
+                echo "$player $ip $timestamp" >> "$TMP_PLAYER_IPS"
             fi
         elif echo "$line" | grep -q "joined the game"; then
             player=$(echo "$line" | awk -F" " '{print $4}')
             ip=$(grep "^$player " "$TMP_PLAYER_IPS" | awk '{print $2}' | tail -n 1)
+            timestamp=$(grep "^$player " "$TMP_PLAYER_IPS" | awk '{print $3}' | tail -n 1)
             linha=$(grep "^$player:" "$ALLOWED_PLAYERS_FILE")
             
             if [ -z "$linha" ]; then
@@ -79,7 +95,11 @@ check_players() {
     done
 }
 
+# Rodar a limpeza do cache de IPs a cada 15 minutos
+clean_old_cache
+
 while true; do
     check_players
+    clean_old_cache
     sleep 1
 done
