@@ -3,10 +3,11 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Load .env
-if [ -f "$SCRIPT_DIR/src/.env" ]; then
-    export $(grep -v '^#' "$SCRIPT_DIR/src/.env" | xargs)
+# Carrega variáveis do arquivo .env
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
 else
-    echo "❌ Arquivo .env não encontrado. Abortando."
+    echo "❌ Arquivo .env não encontrado em $SCRIPT_DIR. Abortando."
     exit 1
 fi
 
