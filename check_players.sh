@@ -17,9 +17,11 @@ SESSION_NAME="minecraft"
 SERVER_DIR="/opt/minecraft/src"
 ALLOWED_PLAYERS_FILE="$SERVER_DIR/allowed_players.txt"
 TMP_PLAYER_IPS="/tmp/current_players_ips.txt"
+LAST_BLOCKED_FILE="/tmp/last_blocked_players.txt"
 
 mkdir -p /tmp
 > "$TMP_PLAYER_IPS"
+> "$LAST_BLOCKED_FILE"
 
 if [ ! -f "$ALLOWED_PLAYERS_FILE" ]; then
     echo "❌ Arquivo de jogadores permitidos não encontrado. Criando novo arquivo..."
@@ -33,7 +35,12 @@ send_discord_log() {
     local ip="$2"
     local motivo="$3"
 
-    json=$(cat <<EOF
+    # Verificar se já foi enviado uma mensagem para o mesmo jogador nos últimos 5 minutos
+    last_blocked_time=$(grep "^$player:" "$LAST_BLOCKED_FILE" | cut -d':' -f2)
+    current_time=$(date +%s)
+    if [ -z "$last_blocked_time" ] || [ $((current_time - last_blocked_time)) -gt 300 ]; then
+        # Se não foi enviado ou o tempo foi maior que 5 minutos, envia a notificação
+        json=$(cat <<EOF
 {
   "embeds": [{
     "title": "🚫 Jogador bloqueado",
@@ -47,7 +54,11 @@ send_discord_log() {
 }
 EOF
 )
-    curl -s -X POST -H "Content-Type: application/json" -d "$json" "$WEBHOOK_URL" > /dev/null
+        curl -s -X POST -H "Content-Type: application/json" -d "$json" "$WEBHOOK_URL" > /dev/null
+
+        # Atualiza o tempo da última notificação para este jogador
+        echo "$player:$current_time" > "$LAST_BLOCKED_FILE"
+    fi
 }
 
 # Limpar entradas antigas de IPs no cache (mais de 1 hora, 3600 segundos)
