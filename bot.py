@@ -167,25 +167,26 @@ async def rank(ctx, objetivo: str):
     await ctx.send(msg)
 
 @bot.command()
-async def addplayer(ctx, player_name: str):
+async def addplayer(ctx, player_name: str, ip: str):
     role_required = "Operador do Nether"
 
     # Verifica se o autor tem o cargo necessário
     if any(role.name == role_required for role in ctx.author.roles):
         file_path = "/opt/minecraft/src/allowed_players.txt"
+        player_entry = f"{player_name}:{ip}"
         try:
             # Verifica se o player já está na whitelist
             with open(file_path, "r") as f:
                 lines = f.read().splitlines()
-                if player_name in lines:
+                if any(line.startswith(f"{player_name}:") for line in lines):
                     await ctx.send(f"⚠️ O jogador `{player_name}` já está na whitelist.")
                     return
 
-            # Adiciona o player ao arquivo
+            # Adiciona o player e IP ao arquivo
             with open(file_path, "a") as f:
-                f.write(player_name + "\n")
+                f.write(player_entry + "\n")
 
-            await ctx.send(f"✅ O jogador `{player_name}` foi adicionado à whitelist com sucesso.")
+            await ctx.send(f"✅ O jogador `{player_name}` com IP `{ip}` foi adicionado à whitelist com sucesso.")
         except Exception as e:
             await ctx.send(f"❌ Ocorreu um erro ao tentar adicionar o jogador: {e}")
     else:
