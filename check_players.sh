@@ -77,24 +77,48 @@ clean_old_cache() {
 
 check_players() {
     tmux capture-pane -t "$SESSION_NAME" -pS -150 | while read line; do
+        echo "Linha do log: $line"  # Depuração: Mostra a linha do log sendo processada
+
+        # Verifica se a linha contém a informação de que um jogador se conectou
         if echo "$line" | grep -q "logged in with entity id"; then
+            # Extrai o nome do jogador
             player=$(echo "$line" | grep -oP "\]: \K.*(?=\[)")
-            ip=$(echo "$line" | grep -oP "(/[\d\.]+)" | tr -d '/')
+
+            # Extrai o IP do jogador
+            ip=$(echo "$line" | grep -oP "(?<=/)[\d\.]+")
+
+            echo "Jogador: $player, IP: $ip"  # Depuração: Mostra o jogador e o IP extraído
+
+            # Verifica se o nome do jogador e o IP foram extraídos corretamente
             if [ -n "$player" ] && [ -n "$ip" ]; then
                 timestamp=$(date +%s)  # Marca o tempo do IP
-                echo "$player $ip $timestamp" >> "$TMP_PLAYER_IPS"
+                echo "$player $ip $timestamp" >> "$TMP_PLAYER_IPS"  # Armazena no arquivo temporário
+            else
+                echo "Erro: Jogador ou IP não encontrados na linha do log."
             fi
-        elif echo "$line" | grep -q "joined the game"; then
-            player=$(echo "$line" | awk -F" " '{print $4}')
+        fi
+
+        # Verifica quando um jogador entrou no jogo
+        if echo "$line" | grep -q "joined the game"; then
+            # Extrai o nome do jogador que entrou no jogo
+            player=$(echo "$line" | awk '{print $4}')
+
+            # Encontra o IP correspondente ao jogador
             ip=$(grep "^$player " "$TMP_PLAYER_IPS" | awk '{print $2}' | tail -n 1)
+
+            # Encontra o timestamp do IP correspondente
             timestamp=$(grep "^$player " "$TMP_PLAYER_IPS" | awk '{print $3}' | tail -n 1)
+
+            echo "Verificando jogador: $player, IP: $ip"  # Depuração: Mostra o jogador e o IP
+
+            # Verifica se o jogador está na lista de permitidos
             linha=$(grep "^$player:" "$ALLOWED_PLAYERS_FILE")
-            
             if [ -z "$linha" ]; then
                 echo "⚠️ Jogador $player não está na whitelist. Kickando..."
                 sudo tmux send-keys -t "$SESSION_NAME" "kick $player Jogador não permitido" C-m
                 send_discord_log "$player" "$ip" "Não está na whitelist"
             else
+                # Verifica se o IP corresponde ao permitido
                 allowed_ip=$(echo "$linha" | cut -d':' -f2)
                 if [ "$ip" != "$allowed_ip" ]; then
                     echo "⚠️ IP diferente para $player. Kickando..."
@@ -105,6 +129,7 @@ check_players() {
         fi
     done
 }
+
 
 # Rodar a limpeza do cache de IPs a cada 15 minutos
 clean_old_cache
