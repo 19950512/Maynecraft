@@ -1,9 +1,12 @@
+import re
+import html
 import discord
 from discord.ext import commands
 import subprocess
 import asyncio
 from dotenv import load_dotenv
 import os
+import logging
 
 # Carrega as variáveis de ambiente do arquivo .env
 load_dotenv()
@@ -16,27 +19,52 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+# Configuração de logging
+logging.basicConfig(level=logging.INFO)
+
 def send_command_to_minecraft(cmd):
-    subprocess.run(['tmux', 'send-keys', '-t', TMUX_SESSION, cmd, 'Enter'])
+    try:
+        subprocess.run(['tmux', 'send-keys', '-t', TMUX_SESSION, cmd, 'Enter'], check=True)
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Erro ao enviar comando para o Minecraft: {e}")
+        raise
 
 async def get_last_output_from_minecraft():
-    # Captura as últimas 100 linhas do pane do tmux
-    result = subprocess.run(['tmux', 'capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-100'],
-                            capture_output=True, text=True)
-    output = result.stdout.splitlines()
+    try:
+        result = subprocess.run(
+            ['tmux', 'capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-100'],
+            capture_output=True, text=True, timeout=5
+        )
+        result.check_returncode()
+        output = result.stdout.splitlines()
 
-    # Procura pela última linha que contenha "There are" ou "Jogadores"
-    for line in reversed(output):
-        if "There are" in line or "Jogadores conectados" in line or "players" in line:
-            return line.strip()
-    return "❌ Não foi possível encontrar a saída do comando."
+        # Procura pela última linha que contenha "There are" ou "Jogadores"
+        for line in reversed(output):
+            if "There are" in line or "Jogadores conectados" in line or "players" in line:
+                return line.strip()
+        return "❌ Não foi possível encontrar a saída do comando."
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Erro ao capturar o painel do tmux: {e}")
+        return "❌ Erro ao capturar informações do servidor."
+    except Exception as e:
+        logging.error(f"Erro inesperado ao obter a saída do Minecraft: {e}")
+        return "❌ Erro inesperado."
+
+def is_valid_player_name(player_name: str) -> bool:
+    return bool(re.fullmatch(r"^[a-zA-Z0-9_]{3,16}$", player_name))
 
 @bot.command()
 async def players(ctx):
-    send_command_to_minecraft("list")
-    await asyncio.sleep(1.5)  # Pequeno delay para o servidor responder
-    response = await get_last_output_from_minecraft()
-    await ctx.send(f"👥 {response}")
+    try:
+        send_command_to_minecraft("list")
+        await asyncio.sleep(1.5)  # Pequeno delay para o servidor responder
+        response = await get_last_output_from_minecraft()
+        if response:
+            await ctx.send(f"👥 {response}")
+        else:
+            await ctx.send("❌ Não foi possível obter a lista de jogadores.")
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao tentar obter a lista de jogadores: {str(e)}")
 
 @bot.command()
 async def comandos(ctx):
@@ -45,194 +73,157 @@ async def comandos(ctx):
         "**👥 Informações de Jogadores**\n"
         "`!players` — Mostra os jogadores online\n"
         "`!estatisticas <jogador>` — Exibe estatísticas detalhadas\n"
-        "`!rank <objetivo>` — Exibe o ranking de um objetivo\n\n"
-        "**📊 Objetivos de Rank disponíveis:**\n"
-        "`mortes` — Total de vezes que o jogador morreu\n"
-        "`kills` — Jogadores assassinados (PvP)\n"
-        "`mobkills` — Criaturas abatidas (PvE)\n"
-        "`jumps` — Quantidade de pulos\n"
-        "`joins` — Quantidade de vezes que o jogador saiu do jogo\n\n"
         "**🔧 Administração (Operador do Nether)**\n"
         "`!addplayer <jogador>` — Adiciona jogador à whitelist\n"
-        "`!rank <objetivo>` — Mostra ranking de mortes, kills, pulos, etc.\n\n"
     )
 
     await ctx.send(msg)
 
 @bot.command()
 async def estatisticas(ctx, player_name: str):
-    
     role_required = "Operador do Nether"
     if not any(role.name == role_required for role in ctx.author.roles):
-        return await ctx.send("⛔ Você não tem permissão para ver o ranking.")
+        return await ctx.send("⛔ Você não tem permissão para ver as estatísticas.")
+
+    # Validação do nome do jogador
+    if not is_valid_player_name(player_name):
+        return await ctx.send("❌ Nome de jogador inválido.")
 
     stats = {}
     objetivos = {
         "mortes": "Mortes",
-        "kills": "Assassinatos",
-        "mobkills": "Abates",
+        "kills": "Assassinatos (PvP)",
+        "mobkills": "Abates (Mobs)",
         "playtime": "Tempo de Jogo",
         "jumps": "Pulos",
-        "joins": "Saídas"
+        "joins": "Entradas no servidor"
     }
 
     for obj in objetivos:
-        send_command_to_minecraft(f"scoreboard players get {player_name} {obj}")
-        await asyncio.sleep(0.5)  # pequena pausa entre comandos
+        try:
+            send_command_to_minecraft(f"scoreboard players get {player_name} {obj}")
+            await asyncio.sleep(0.5)
 
-        result = subprocess.run(['tmux', 'capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-10'],
-                                capture_output=True, text=True)
-        output = result.stdout.splitlines()
+            result = subprocess.run(
+                ['tmux', 'capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-10'],
+                capture_output=True, text=True, timeout=3
+            )
+            result.check_returncode()
+            output = result.stdout.splitlines()
 
-        for line in reversed(output):
-            if f"{player_name} has" in line or f"{player_name} has" in line:
-                parts = line.split("has")
-                if len(parts) > 1:
-                    value = ''.join(filter(str.isdigit, parts[1]))
-                    stats[obj] = int(value) if value else 0
+            for line in reversed(output):
+                match = re.search(rf"{re.escape(player_name)} has (\d+)", line)
+                if match:
+                    stats[obj] = int(match.group(1))
                     break
+        except Exception as e:
+            logging.warning(f"Erro ao tentar obter estatísticas de {player_name} para o objetivo {obj}: {str(e)}")
+            continue  # Se falhar um objetivo, ignora e segue
 
     if not stats:
         return await ctx.send(f"❌ Não foi possível encontrar estatísticas para `{player_name}`.")
 
-    # Converte tempo de jogo (ticks) para minutos
+    # Converte ticks em minutos
     playtime_ticks = stats.get("playtime", 0)
     playtime_minutes = round(playtime_ticks / 1200, 2)
 
     msg = f"📋 **Estatísticas de `{player_name}`**\n"
-    msg += f"🩸 Mortes: {stats.get('mortes', 0)}\n"
-    msg += f"⚔️ Assassinatos (PvP): {stats.get('kills', 0)}\n"
-    msg += f"🧟 Abates (Mobs): {stats.get('mobkills', 0)}\n"
-    msg += f"🕒 Tempo de jogo: {playtime_minutes} minutos\n"
-    msg += f"🦘 Pulos: {stats.get('jumps', 0)}\n"
-    msg += f"🚪 Saídas do servidor: {stats.get('joins', 0)}"
+    msg += f"🩸 {objetivos['mortes']}: {stats.get('mortes', 0)}\n"
+    msg += f"⚔️ {objetivos['kills']}: {stats.get('kills', 0)}\n"
+    msg += f"🧟 {objetivos['mobkills']}: {stats.get('mobkills', 0)}\n"
+    msg += f"🕒 {objetivos['playtime']}: {playtime_minutes} minutos\n"
+    msg += f"🦘 {objetivos['jumps']}: {stats.get('jumps', 0)}\n"
+    msg += f"🚪 {objetivos['joins']}: {stats.get('joins', 0)}"
 
     await ctx.send(msg)
 
-# Comando para kickar um jogador
 @bot.command()
 async def kick(ctx, player_name: str):
     if not has_permission(ctx):
         await ctx.send("⛔ Você não tem permissão para usar este comando.")
         return
 
-    send_command_to_minecraft(f"kick {player_name}")
-    await ctx.send(f"👢 {player_name} foi expulso do servidor.")
+    # Validação do nome do jogador
+    if not is_valid_player_name(player_name):
+        await ctx.send("❌ Nome de jogador inválido.")
+        return
 
-objective_labels = {
-    "mortes": "Mortes",
-    "kills": "Assassinatos",
-    "mobkills": "Abates",
-    "playtime": "Tempo de Jogo",
-    "jumps": "Pulos",
-    "joins": "Saídas"
-}
-
-@bot.command()
-async def rank(ctx, objetivo: str):
-    if objetivo not in objective_labels:
-        return await ctx.send(f"❌ Objetivo inválido. Escolha um: {', '.join(objective_labels.keys())}")
-
-    role_required = "Operador do Nether"
-    if not any(role.name == role_required for role in ctx.author.roles):
-        return await ctx.send("⛔ Você não tem permissão para ver o ranking.")
-
-    send_command_to_minecraft(f"scoreboard objectives setdisplay sidebar {objetivo}")
-    await asyncio.sleep(2)
-
-    result = subprocess.run(['tmux', 'capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-30'],
-                            capture_output=True, text=True)
-    output = result.stdout.splitlines()
-
-    lines = [line for line in output if " - " in line and any(char.isdigit() for char in line)]
-    if not lines:
-        return await ctx.send("❌ Não foi possível obter o ranking.")
-
-    ranking = []
-    for line in lines:
-        try:
-            parts = line.split("INFO]:")[-1].strip()
-            if " - " in parts:
-                value, name = parts.split(" - ")
-                ranking.append((int(value.strip()), name.strip()))
-        except:
-            continue
-
-    ranking.sort(reverse=True)
-
-    msg = f"📊 **Ranking de {objective_labels[objetivo]}**\n"
-    for i, (value, name) in enumerate(ranking, 1):
-        msg += f"{i}. {name} — {value}\n"
-
-    await ctx.send(msg)
+    command = f"kick {player_name}"
+    try:
+        send_command_to_minecraft(command)
+        await ctx.send(f"👢 O jogador `{player_name}` foi expulso do servidor com sucesso.")
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao tentar expulsar o jogador: `{str(e)}`")
 
 @bot.command()
 async def addplayer(ctx, player_name: str, ip: str):
     role_required = "Operador do Nether"
 
-    # Verifica se o autor tem o cargo necessário
-    if any(role.name == role_required for role in ctx.author.roles):
-        file_path = "/opt/minecraft/src/allowed_players.txt"
-        player_entry = f"{player_name}:{ip}"
-        try:
-            # Verifica se o player já está na whitelist
-            with open(file_path, "r") as f:
-                lines = f.read().splitlines()
-                if any(line.startswith(f"{player_name}:") for line in lines):
-                    await ctx.send(f"⚠️ O jogador `{player_name}` já está na whitelist.")
-                    return
-
-            # Adiciona o player e IP ao arquivo
-            with open(file_path, "a") as f:
-                f.write(player_entry + "\n")
-
-            await ctx.send(f"✅ O jogador `{player_name}` com IP `{ip}` foi adicionado à whitelist com sucesso.")
-        except Exception as e:
-            await ctx.send(f"❌ Ocorreu um erro ao tentar adicionar o jogador: {e}")
-    else:
+    if not any(role.name == role_required for role in ctx.author.roles):
         await ctx.send("⛔ Você não tem permissão para usar este comando.")
+        return
+
+    # Validação do nome do jogador
+    if not is_valid_player_name(player_name):
+        await ctx.send("❌ Nome de jogador inválido.")
+        return
+
+    # Validação do IP
+    if not re.fullmatch(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
+        await ctx.send("❌ Endereço IP inválido. Formato esperado: 0.0.0.0")
+        return
+
+    # Sanitização de entradas
+    player_name = html.escape(player_name)
+    ip = html.escape(ip)
+
+    file_path = "/opt/minecraft/src/allowed_players.txt"
+    player_entry = f"{player_name}:{ip}"
+
+    try:
+        # Verifica se o player já está na whitelist
+        with open(file_path, "r") as f:
+            lines = f.read().splitlines()
+            if any(line.startswith(f"{player_name}:") for line in lines):
+                await ctx.send(f"⚠️ O jogador `{player_name}` já está na whitelist com IP `{ip}`.")
+                return
+
+        # Adiciona o player e IP ao arquivo
+        with open(file_path, "a") as f:
+            f.write(player_entry + "\n")
+
+        await ctx.send(f"✅ O jogador `{player_name}` com IP `{ip}` foi adicionado à whitelist com sucesso.")
+    except Exception as e:
+        await ctx.send(f"❌ Ocorreu um erro ao tentar adicionar o jogador: `{str(e)}`")
 
 # User ID do Maydaz
 def has_permission(ctx, user_id=678217602023292940):
     return ctx.author.id == user_id
 
 @bot.command()
-async def give(ctx, player_name: str, item_name: str, amount: int = 1):
+async def give(ctx, player_name: str, item_name: str, amount_input: str = "1"):
     if not has_permission(ctx):
         return await ctx.send("⛔ Você não tem permissão para usar este comando.")
 
-    send_command_to_minecraft(f"give {player_name} {item_name} {amount}")
-    await ctx.send(f"🎁 {amount}x {item_name} foi dado a {player_name}.")
+    # Verifica se amount é um número inteiro positivo
+    if not amount_input.isdigit():
+        return await ctx.send("❌ Quantidade inválida.")
 
-# Comando para banir um jogador
-@bot.command()
-async def ban(ctx, player_name: str):
-    if not has_permission(ctx):
-        await ctx.send("⛔ Você não tem permissão para usar este comando.")
+    amount = int(amount_input)
+    if amount <= 0:
+        return await ctx.send("❌ A quantidade deve ser maior que zero.")
+
+    # Valida nome do jogador
+    if not is_valid_player_name(player_name):
+        await ctx.send("❌ Nome de jogador inválido.")
         return
 
-    send_command_to_minecraft(f"ban {player_name}")
-    await ctx.send(f"🔨 {player_name} foi banido do servidor.")
+    command = f"give {player_name} {item_name} {amount}"
+    try:
+        send_command_to_minecraft(command)
+        await ctx.send(f"🎁 O jogador `{player_name}` recebeu {amount} de {item_name}.")
+    except Exception as e:
+        await ctx.send(f"❌ Erro ao dar item: {str(e)}")
 
-# Comando para teleportar um jogador
-@bot.command()
-async def tp(ctx, player_name: str, target_name: str):
-    if not has_permission(ctx):
-        await ctx.send("⛔ Você não tem permissão para usar este comando.")
-        return
-
-    send_command_to_minecraft(f"tp {player_name} {target_name}")
-    await ctx.send(f"🧭 {player_name} foi teleportado para {target_name}.")
-
-# Comando para mudar o modo de jogo
-@bot.command()
-async def gamemode(ctx, player_name: str, mode: str):
-    if not has_permission(ctx):
-        await ctx.send("⛔ Você não tem permissão para usar este comando.")
-        return
-
-    send_command_to_minecraft(f"gamemode {mode} {player_name}")
-    await ctx.send(f"🎮 {player_name} agora está em modo {mode}.")
-
-# Inicia o bot
-bot.run(DISCORD_TOKEN)  # Usa o token do .env
+# Inicia o bot com o token
+bot.run(DISCORD_TOKEN)
