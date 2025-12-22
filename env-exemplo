@@ -1,4 +1,67 @@
+# ═══════════════════════════════════════════════════════════════════
+# 🎮 CONFIGURAÇÃO DO SERVIDOR MINECRAFT COM BOT DISCORD
+# ═══════════════════════════════════════════════════════════════════
+# 
+# Instruções de configuração completa em: SETUP.md
+# 
+
+# ─────────────────────────────────────────────────────────────────────
+# 🤖 DISCORD - OBRIGATÓRIO
+# ─────────────────────────────────────────────────────────────────────
+# 
+# DISCORD_TOKEN
+#   Como obter:
+#     1. Acesse: https://discord.com/developers/applications
+#     2. Crie uma nova aplicação ou abra uma existente
+#     3. Vá em "Bot" → "Copy" do TOKEN
+#
+DISCORD_TOKEN=seu_token_discord_aqui_123abc...
+
+# DISCORD_WEBHOOK_URL
+#   Como obter:
+#     1. Servidor Discord → Configurações → Integrações → Webhooks
+#     2. "New Webhook" → Copy Link
+#     Exemplo: https://discord.com/api/webhooks/123456/abc123...
+#
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/seu_id/seu_token
+
+# ─────────────────────────────────────────────────────────────────────
+# 🎮 MINECRAFT - OBRIGATÓRIO
+# ─────────────────────────────────────────────────────────────────────
+#
+# MINECRAFT_SERVER_URL
+#   URL do servidor.jar a ser baixado
+#   Versão padrão: 1.21.4
+#   Outras versões: https://launcher.mojang.com/v1/objects
+#
 MINECRAFT_SERVER_URL=https://piston-data.mojang.com/v1/objects/4707d00eb834b446575d89a61a11b5d548d8c001/server.jar
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/XXXXXXXx/YYYYYYYYYYYYYYYYYYY
-DISCORD_TOKEN=XXXXXXXXXXXXXXXXXXXXXx
+
+# TMUX_SESSION
+#   Nome da sessão tmux (não mude normalmente)
+#
 TMUX_SESSION=minecraft
+
+# ─────────────────────────────────────────────────────────────────────
+# ☁️ CLOUDFLARE R2 - OPCIONAL (para backups na nuvem)
+# ─────────────────────────────────────────────────────────────────────
+#
+# Se não quiser usar, deixe em branco ou comente com #
+#
+# Como configurar:
+#   1. Crie conta em: https://www.cloudflare.com/
+#   2. Vá em "R2 Object Storage" → "Create Bucket"
+#   3. Vá em "API Tokens" → "Create API token"
+#   4. Preencha com suas credenciais abaixo
+#
+R2_ACCESS_KEY=sua_chave_acesso
+R2_SECRET_KEY=sua_chave_secreta
+R2_BUCKET_NAME=seu_bucket_minecraft
+R2_ENDPOINT_URL=https://sua-conta.r2.cloudflarestorage.com
+
+# ─────────────────────────────────────────────────────────────────────
+# 📁 CAMINHOS - NÃO MUDE NORMALMENTE
+# ─────────────────────────────────────────────────────────────────────
+#
+MINECRAFT_DIR=/minecraft/server
+BACKUP_DIR=/minecraft/backups
+LOG_DIR=/minecraft/logs

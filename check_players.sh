@@ -1,20 +1,10 @@
 #!/bin/bash
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Load .env
-# Carrega variáveis do arquivo .env
-if [ -f "$SCRIPT_DIR/.env" ]; then
-    export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
-else
-    echo "❌ Arquivo .env não encontrado em $SCRIPT_DIR. Abortando."
-    exit 1
-fi
-
+# As variáveis de ambiente já vêm do docker-compose.yml
 WEBHOOK_URL="$DISCORD_WEBHOOK_URL"
 
 SESSION_NAME="minecraft"
-SERVER_DIR="/opt/minecraft/src"
+SERVER_DIR="/minecraft/server"
 ALLOWED_PLAYERS_FILE="$SERVER_DIR/allowed_players.txt"
 TMP_PLAYER_IPS="/tmp/current_players_ips.txt"
 LAST_BLOCKED_FILE="/tmp/last_blocked_players.txt"
@@ -76,16 +66,16 @@ clean_old_cache() {
 }
 
 check_players() {
-    tmux capture-pane -t "$SESSION_NAME" -pS -150 | while read line; do
+    tail -F "$SERVER_DIR/logs/latest.log" 2>/dev/null | while read line; do
         echo "Linha do log: $line"  # Depuração: Mostra a linha do log sendo processada
 
         # Verifica se a linha contém a informação de que um jogador se conectou
         if echo "$line" | grep -q "logged in with entity id"; then
-            # Extrai o nome do jogador
-            player=$(echo "$line" | grep -oP "\]: \K.*(?=\[)")
+            # Extrai o nome do jogador (antes do colchete)
+            player=$(echo "$line" | grep -oP '\[Server thread/INFO\]: \K[^[]+(?=\[)')
 
-            # Extrai o IP do jogador
-            ip=$(echo "$line" | grep -oP "(?<=/)[\d\.]+")
+            # Extrai o IP do jogador (entre / e :)
+            ip=$(echo "$line" | grep -oP '\[/\K[0-9.]+(?=:)')
 
             echo "Jogador: $player, IP: $ip"  # Depuração: Mostra o jogador e o IP extraído
 
@@ -101,7 +91,7 @@ check_players() {
         # Verifica quando um jogador entrou no jogo
         if echo "$line" | grep -q "joined the game"; then
             # Extrai o nome do jogador que entrou no jogo
-            player=$(echo "$line" | awk '{print $4}')
+            player=$(echo "$line" | grep -oP '\[Server thread/INFO\]: \K[^ ]+(?= joined the game)')
 
             # Encontra o IP correspondente ao jogador
             ip=$(grep "^$player " "$TMP_PLAYER_IPS" | awk '{print $2}' | tail -n 1)
@@ -115,14 +105,19 @@ check_players() {
             linha=$(grep "^$player:" "$ALLOWED_PLAYERS_FILE")
             if [ -z "$linha" ]; then
                 echo "⚠️ Jogador $player não está na whitelist. Kickando..."
-                sudo tmux send-keys -t "$SESSION_NAME" "kick $player Jogador não permitido" C-m
+                tmux send-keys -t "$SESSION_NAME" "kick $player Jogador não permitido" C-m
                 send_discord_log "$player" "$ip" "Não está na whitelist"
             else
                 # Verifica se o IP corresponde ao permitido
                 allowed_ip=$(echo "$linha" | cut -d':' -f2)
-                if [ "$ip" != "$allowed_ip" ]; then
+                
+                # Se IP for "any", aceita e atualiza com o IP real
+                if [ "$allowed_ip" = "any" ]; then
+                    echo "✅ Primeira conexão de $player, registrando IP: $ip"
+                    sed -i "s/^$player:any$/$player:$ip/" "$ALLOWED_PLAYERS_FILE"
+                elif [ "$ip" != "$allowed_ip" ]; then
                     echo "⚠️ IP diferente para $player. Kickando..."
-                    sudo tmux send-keys -t "$SESSION_NAME" "kick $player IP não autorizado" C-m
+                    tmux send-keys -t "$SESSION_NAME" "kick $player IP não autorizado" C-m
                     send_discord_log "$player" "$ip" "IP não autorizado (esperado: $allowed_ip)"
                 fi
             fi

@@ -1,0 +1,36 @@
+# Arquivos e diretórios Docker
+server-data/
+backups/
+logs/
+
+# Dados do servidor
+world/
+world_nether/
+world_the_end/
+*.jar
+*.log
+crash-reports/
+libraries/
+versions/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+
+# Ambiente
+.env
+
+# Git
+.git/
+.gitignore
+
+# Outros
+*.bak
+*.tmp
+.DS_Store

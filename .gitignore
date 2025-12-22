@@ -2,3 +2,11 @@ servidor/*
 !servidor/.gitkeep
 
 .env
+
+# Docker volumes e dados
+server-data/
+backups/
+logs/
+
+# Arquivos temporários Docker
+get-docker.sh

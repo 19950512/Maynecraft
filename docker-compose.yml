@@ -1,0 +1,25 @@
+services:
+  minecraft:
+    build: .
+    container_name: minecraft-server
+    restart: unless-stopped
+    ports:
+      - "25565:25565"
+    volumes:
+      - ./server-data:/minecraft/server
+      - ./backups:/minecraft/backups
+      - ./logs:/minecraft/logs
+    env_file:
+      - .env
+    environment:
+      - MINECRAFT_DIR=/minecraft/server
+      - BACKUP_DIR=/minecraft/backups
+      - LOG_DIR=/minecraft/logs
+    stdin_open: true
+    tty: true
+    networks:
+      - minecraft-net
+
+networks:
+  minecraft-net:
+    driver: bridge

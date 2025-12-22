@@ -97,8 +97,17 @@ def main():
     print("📁 Criando backup...")
     file_name, file_path = create_backup()
 
-    print("☁️ Enviando para Cloudflare R2...")
-    download_url = upload_to_r2(file_name, file_path)
+    # Tenta upload para R2 se configurado
+    download_url = None
+    if R2_ACCESS_KEY and R2_SECRET_KEY and R2_BUCKET_NAME:
+        try:
+            print("☁️ Enviando para Cloudflare R2...")
+            download_url = upload_to_r2(file_name, file_path)
+            print(f"✅ Backup enviado! URL: {download_url}")
+        except Exception as e:
+            print(f"⚠️  Erro ao enviar para R2 (backup local OK): {e}")
+    else:
+        print("⚠️  R2 não configurado, mantendo apenas backup local")
 
     # Limpeza dos backups antigos
     print("🧹 Limpando backups antigos...")
@@ -107,7 +116,11 @@ def main():
     print("✅ Reativando salvamento automático...")
     run_tmux_command("save-on")
 
-    success_message = f"✅ Backup Minecraft finalizado com sucesso!\n🔗 Link válido por 7 dias:\n{download_url}"
+    if download_url:
+        success_message = f"✅ Backup Minecraft finalizado com sucesso!\n🔗 Link válido por 7 dias:\n{download_url}"
+    else:
+        success_message = f"✅ Backup local criado: {file_name}"
+    
     print(success_message)
     send_discord_message(success_message)
 

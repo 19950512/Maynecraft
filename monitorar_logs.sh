@@ -1,15 +1,20 @@
 #!/bin/bash
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="/opt/minecraft/src/logs/latest.log"
+# As variáveis de ambiente vêm do docker-compose.yml e docker-entrypoint.sh
+LOG_FILE="${MINECRAFT_DIR:-/minecraft/server}/logs/latest.log"
+WEBHOOK_URL="${DISCORD_WEBHOOK_URL}"
+KNOWN_LOGINS="/tmp/known_logins.txt"
 
-# Load .env
-if [ -f "$SCRIPT_DIR/src/.env" ]; then
-    export $(grep -v '^#' "$SCRIPT_DIR/src/.env" | xargs)
-else
-    echo "❌ Arquivo .env não encontrado. Abortando."
+# Verifica se WEBHOOK_URL está configurado
+if [ -z "$WEBHOOK_URL" ]; then
+    echo "❌ DISCORD_WEBHOOK_URL não configurado. Verifique o arquivo .env"
     exit 1
 fi
+
+echo "✅ Monitorando logs em: $LOG_FILE"
+echo "📡 Webhook URL configurado"
+
+> "$KNOWN_LOGINS"
 
 WEBHOOK_URL="$DISCORD_WEBHOOK_URL"
 KNOWN_LOGINS="/tmp/known_logins.txt"
