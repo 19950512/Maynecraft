@@ -25,6 +25,14 @@ DISCORD_TOKEN=seu_token_discord_aqui_123abc...
 #
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/seu_id/seu_token
 
+# DISCORD_GUILD_ID (opcional, recomendado)
+#  - ID do servidor (guild) do Discord onde o bot será usado.
+#  - Com isso, os comandos slash são sincronizados instantaneamente.
+#  - Como obter: Vá em Configurações de Desenvolvedor → Ativar modo developer →
+#    clique com botão direito no servidor → "Copiar ID".
+# Exemplo: 123456789012345678
+DISCORD_GUILD_ID=
+
 # ─────────────────────────────────────────────────────────────────────
 # 🎮 MINECRAFT - OBRIGATÓRIO
 # ─────────────────────────────────────────────────────────────────────

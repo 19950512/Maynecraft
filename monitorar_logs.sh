@@ -38,9 +38,27 @@ tail -n0 -F "$LOG_FILE" | while read LINE; do
     elif echo "$LINE" | grep -q "has made the advancement"; then
         ADV=$(echo "$LINE" | grep -oP "\]: \K.*")
         curl -s -H "Content-Type: application/json" -X POST -d "{\"content\": \"🎖️ **$ADV**\"}" "$WEBHOOK_URL"
-    elif echo "$LINE" | grep -E -q "was slain|was shot|was killed|fell from|tried to|drowned|burned|blew up"; then
+    elif echo "$LINE" | grep -E -q "was slain|was shot|was killed|fell from|tried to|drowned|burned|blew up|suffocated|starved|withered|froze"; then
         DEATH=$(echo "$LINE" | grep -oP "\]: \K.*")
-        curl -s -H "Content-Type: application/json" -X POST -d "{\"content\": \"💀 $DEATH\"}" "$WEBHOOK_URL"
+        # Extrai jogador e causa
+        PLAYER=$(echo "$DEATH" | grep -oP "^[^ ]+")
+        CAUSE=$(echo "$DEATH" | sed "s/^$PLAYER //")
+        
+        # Traduz causas comuns
+        case "$CAUSE" in
+            *"fell from a high place"*) CAUSE_PT="caiu de um lugar alto 🪂" ;;
+            *"was slain by"*) MOB=$(echo "$CAUSE" | sed 's/was slain by //'); CAUSE_PT="foi morto por $MOB ⚔️" ;;
+            *"was shot by"*) MOB=$(echo "$CAUSE" | sed 's/was shot by //'); CAUSE_PT="foi alvejado por $MOB 🏹" ;;
+            *"drowned"*) CAUSE_PT="morreu afogado 🌊" ;;
+            *"tried to swim in lava"*) CAUSE_PT="tentou nadar na lava 🌋" ;;
+            *"burned to death"*) CAUSE_PT="queimou até a morte 🔥" ;;
+            *"blew up"*) CAUSE_PT="explodiu 💥" ;;
+            *"suffocated"*) CAUSE_PT="sufocou em uma parede 🧱" ;;
+            *"starved to death"*) CAUSE_PT="morreu de fome 🍖" ;;
+            *) CAUSE_PT="$CAUSE" ;;
+        esac
+        
+        curl -s -H "Content-Type: application/json" -X POST -d "{\"content\": \"💀 **$PLAYER** $CAUSE_PT\"}" "$WEBHOOK_URL"
     elif echo "$LINE" | grep -q "\[Not Secure\]"; then
         PLAYER=$(echo "$LINE" | grep -oP "\[Not Secure\] <\K.*(?=>)")
         MESSAGE=$(echo "$LINE" | grep -oP "\[Not Secure\] <.*> \K.*")

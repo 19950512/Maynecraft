@@ -16,8 +16,7 @@ mkdir -p /tmp
 if [ ! -f "$ALLOWED_PLAYERS_FILE" ]; then
     echo "❌ Arquivo de jogadores permitidos não encontrado. Criando novo arquivo..."
     touch "$ALLOWED_PLAYERS_FILE"
-    echo "Lista criada. Adicione os jogadores permitidos ao arquivo $ALLOWED_PLAYERS_FILE."
-    exit 1
+    echo "⚠️ Lista vazia criada. Todos os jogadores serão bloqueados até que sejam adicionados."
 fi
 
 send_discord_log() {

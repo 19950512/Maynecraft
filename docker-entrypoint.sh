@@ -161,6 +161,14 @@ tmux new-session -d -s "$TMUX_SESSION" "java -Xmx${MAX_RAM:-1024M} -Xms${MIN_RAM
 # Aguarda o servidor inicializar um pouco
 sleep 5
 
+# Inicializa objetivos de scoreboard para estatísticas usadas pelo bot
+echo "📈 Inicializando objetivos de scoreboard..."
+tmux send-keys -t "$TMUX_SESSION" "scoreboard objectives add playtime minecraft.custom:minecraft.play_time" Enter
+tmux send-keys -t "$TMUX_SESSION" "scoreboard objectives add jumps minecraft.custom:minecraft.jump" Enter
+tmux send-keys -t "$TMUX_SESSION" "scoreboard objectives add mortes minecraft.custom:minecraft.deaths" Enter
+tmux send-keys -t "$TMUX_SESSION" "scoreboard objectives add kills minecraft.custom:minecraft.player_kills" Enter
+tmux send-keys -t "$TMUX_SESSION" "scoreboard objectives add mobkills minecraft.custom:minecraft.mob_kills" Enter
+
 # Inicia monitoramento de logs (em background)
 echo "📊 Iniciando monitoramento de logs..."
 nohup /minecraft/monitorar_logs.sh > /minecraft/logs/monitor.log 2>&1 &

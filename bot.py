@@ -2,6 +2,7 @@ import re
 import html
 import discord
 from discord.ext import commands
+from discord import app_commands
 import subprocess
 import asyncio
 from dotenv import load_dotenv
@@ -14,10 +15,37 @@ load_dotenv()
 # Obtém o token e a sessão do tmux a partir do .env
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 TMUX_SESSION = os.getenv("TMUX_SESSION", "minecraft")  # Valor padrão 'minecraft' caso não esteja no .env
+GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+
+class MayneBot(commands.Bot):
+    async def setup_hook(self):
+        # Sincroniza os comandos slash na inicialização
+        try:
+            if GUILD_ID:
+                guild = discord.Object(id=int(GUILD_ID))
+                await self.tree.sync(guild=guild)
+                logging.info(f"Slash commands sincronizados para guild {GUILD_ID}")
+            else:
+                await self.tree.sync()
+                logging.info("Slash commands sincronizados globalmente")
+        except Exception as e:
+            logging.error(f"Falha ao sincronizar slash commands: {e}")
+
+bot = MayneBot(command_prefix='!', intents=intents)
+
+@bot.event
+async def on_ready():
+    try:
+        # Copia comandos globais e sincroniza em cada guild do bot (sync instantâneo)
+        for guild in bot.guilds:
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+            logging.info(f"Slash commands sincronizados via on_ready para guild {guild.id} ({guild.name})")
+    except Exception as e:
+        logging.error(f"Falha ao sincronizar slash commands em on_ready: {e}")
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
@@ -53,50 +81,57 @@ async def get_last_output_from_minecraft():
 def is_valid_player_name(player_name: str) -> bool:
     return bool(re.fullmatch(r"^[a-zA-Z0-9_]{3,16}$", player_name))
 
-@bot.command()
-async def players(ctx):
+@bot.tree.command(name="players", description="Mostra os jogadores online")
+async def players(interaction: discord.Interaction):
     try:
+        await interaction.response.defer(thinking=True)
         send_command_to_minecraft("list")
-        await asyncio.sleep(1.5)  # Pequeno delay para o servidor responder
+        await asyncio.sleep(1.5)
         response = await get_last_output_from_minecraft()
         if response:
-            await ctx.send(f"👥 {response}")
+            await interaction.followup.send(f"👥 {response}")
         else:
-            await ctx.send("❌ Não foi possível obter a lista de jogadores.")
+            await interaction.followup.send("❌ Não foi possível obter a lista de jogadores.")
     except Exception as e:
-        await ctx.send(f"❌ Erro ao tentar obter a lista de jogadores: {str(e)}")
+        await interaction.followup.send(f"❌ Erro ao tentar obter a lista de jogadores: {str(e)}")
 
-@bot.command()
-async def comandos(ctx):
+@bot.tree.command(name="comandos", description="Lista os comandos disponíveis")
+async def comandos(interaction: discord.Interaction):
     msg = (
         "**📜 Lista de Comandos Disponíveis**\n\n"
         "**👥 Informações de Jogadores**\n"
-        "`!players` — Mostra os jogadores online\n"
-        "`!estatisticas <jogador>` — Exibe estatísticas detalhadas\n"
+        "`/players` — Mostra os jogadores online\n"
+        "`/estatisticas <jogador>` — Exibe estatísticas detalhadas\n"
         "**🔧 Administração (Operador do Nether)**\n"
-        "`!addplayer <jogador>` — Adiciona jogador à whitelist\n"
+        "`/addplayer <jogador> <ip>` — Adiciona jogador à whitelist (nome:ip)\n"
+        "`/kick <jogador>` — Expulsa jogador\n"
+        "`/give <jogador> <item> [quantidade]` — Dá item ao jogador\n"
     )
+    await interaction.response.send_message(msg)
 
-    await ctx.send(msg)
-
-@bot.command()
-async def estatisticas(ctx, player_name: str):
+@bot.tree.command(name="estatisticas", description="Exibe estatísticas de um jogador")
+@app_commands.describe(player_name="Nome do jogador (3-16 chars)")
+async def estatisticas(interaction: discord.Interaction, player_name: str):
+    await interaction.response.defer(thinking=True)
     role_required = "Operador do Nether"
-    if not any(role.name == role_required for role in ctx.author.roles):
-        return await ctx.send("⛔ Você não tem permissão para ver as estatísticas.")
+    member = interaction.user
+    if isinstance(member, discord.Member):
+        if not any(role.name == role_required for role in member.roles):
+            return await interaction.followup.send("⛔ Você não tem permissão para ver as estatísticas.")
+    else:
+        return await interaction.followup.send("⛔ Comando disponível apenas em servidores.")
 
     # Validação do nome do jogador
     if not is_valid_player_name(player_name):
-        return await ctx.send("❌ Nome de jogador inválido.")
+        return await interaction.followup.send("❌ Nome de jogador inválido.")
 
     stats = {}
     objetivos = {
-        "mortes": "Mortes",
-        "kills": "Assassinatos (PvP)",
-        "mobkills": "Abates (Mobs)",
         "playtime": "Tempo de Jogo",
         "jumps": "Pulos",
-        "joins": "Entradas no servidor"
+        "mortes": "Mortes",
+        "kills": "Assassinatos (PvP)",
+        "mobkills": "Abates (Mobs)"
     }
 
     for obj in objetivos:
@@ -112,72 +147,87 @@ async def estatisticas(ctx, player_name: str):
             output = result.stdout.splitlines()
 
             for line in reversed(output):
-                match = re.search(rf"{re.escape(player_name)} has (\d+)", line)
+                # Procura por "Heitor has 123 [objetivo]"
+                match = re.search(rf"{re.escape(player_name)} has (\d+) \[{re.escape(obj)}\]", line)
                 if match:
                     stats[obj] = int(match.group(1))
                     break
+                # Também aceita "none is set" para não adicionar ao dict
+                if "none is set" in line.lower() or "can't get value" in line.lower():
+                    break
         except Exception as e:
             logging.warning(f"Erro ao tentar obter estatísticas de {player_name} para o objetivo {obj}: {str(e)}")
-            continue  # Se falhar um objetivo, ignora e segue
+            continue
 
     if not stats:
-        return await ctx.send(f"❌ Não foi possível encontrar estatísticas para `{player_name}`.")
+        return await interaction.followup.send(f"❌ Não foi possível encontrar estatísticas para `{player_name}`.")
 
-    # Converte ticks em minutos
+    # Converte ticks em minutos para playtime
     playtime_ticks = stats.get("playtime", 0)
     playtime_minutes = round(playtime_ticks / 1200, 2)
 
     msg = f"📋 **Estatísticas de `{player_name}`**\n"
-    msg += f"🩸 {objetivos['mortes']}: {stats.get('mortes', 0)}\n"
-    msg += f"⚔️ {objetivos['kills']}: {stats.get('kills', 0)}\n"
-    msg += f"🧟 {objetivos['mobkills']}: {stats.get('mobkills', 0)}\n"
-    msg += f"🕒 {objetivos['playtime']}: {playtime_minutes} minutos\n"
-    msg += f"🦘 {objetivos['jumps']}: {stats.get('jumps', 0)}\n"
-    msg += f"🚪 {objetivos['joins']}: {stats.get('joins', 0)}"
+    if "playtime" in stats:
+        msg += f"🕒 {objetivos['playtime']}: {playtime_minutes} minutos\n"
+    if "jumps" in stats:
+        msg += f"🦘 {objetivos['jumps']}: {stats['jumps']}\n"
+    if "mortes" in stats:
+        msg += f"🩸 {objetivos['mortes']}: {stats['mortes']}\n"
+    if "kills" in stats:
+        msg += f"⚔️ {objetivos['kills']}: {stats['kills']}\n"
+    if "mobkills" in stats:
+        msg += f"🧟 {objetivos['mobkills']}: {stats['mobkills']}"
 
-    await ctx.send(msg)
+    await interaction.followup.send(msg)
 
-@bot.command()
-async def kick(ctx, player_name: str):
-    if not has_permission(ctx):
-        await ctx.send("⛔ Você não tem permissão para usar este comando.")
+@bot.tree.command(name="kick", description="Expulsa um jogador do servidor")
+@app_commands.describe(player_name="Nome do jogador")
+async def kick(interaction: discord.Interaction, player_name: str):
+    await interaction.response.defer(thinking=True)
+    if not has_permission(interaction):
+        await interaction.followup.send("⛔ Você não tem permissão para usar este comando.")
         return
 
     # Validação do nome do jogador
     if not is_valid_player_name(player_name):
-        await ctx.send("❌ Nome de jogador inválido.")
+        await interaction.followup.send("❌ Nome de jogador inválido.")
         return
 
     command = f"kick {player_name}"
     try:
         send_command_to_minecraft(command)
-        await ctx.send(f"👢 O jogador `{player_name}` foi expulso do servidor com sucesso.")
+        await interaction.followup.send(f"👢 O jogador `{player_name}` foi expulso do servidor com sucesso.")
     except Exception as e:
-        await ctx.send(f"❌ Erro ao tentar expulsar o jogador: `{str(e)}`")
+        await interaction.followup.send(f"❌ Erro ao tentar expulsar o jogador: `{str(e)}`")
 
-@bot.command()
-async def addplayer(ctx, player_name: str, ip: str):
+@bot.tree.command(name="addplayer", description="Adiciona jogador e IP à whitelist personalizada")
+@app_commands.describe(player_name="Nome do jogador", ip="Endereço IP (ex: 172.21.0.1)")
+async def addplayer(interaction: discord.Interaction, player_name: str, ip: str):
+    await interaction.response.defer(thinking=True)
     role_required = "Operador do Nether"
-
-    if not any(role.name == role_required for role in ctx.author.roles):
-        await ctx.send("⛔ Você não tem permissão para usar este comando.")
-        return
+    member = interaction.user
+    if isinstance(member, discord.Member):
+        if not any(role.name == role_required for role in member.roles):
+            await interaction.followup.send("⛔ Você não tem permissão para usar este comando.")
+            return
+    else:
+        return await interaction.followup.send("⛔ Comando disponível apenas em servidores.")
 
     # Validação do nome do jogador
     if not is_valid_player_name(player_name):
-        await ctx.send("❌ Nome de jogador inválido.")
+        await interaction.followup.send("❌ Nome de jogador inválido.")
         return
 
     # Validação do IP
     if not re.fullmatch(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
-        await ctx.send("❌ Endereço IP inválido. Formato esperado: 0.0.0.0")
+        await interaction.followup.send("❌ Endereço IP inválido. Formato esperado: 0.0.0.0")
         return
 
     # Sanitização de entradas
     player_name = html.escape(player_name)
     ip = html.escape(ip)
 
-    file_path = "/opt/minecraft/src/allowed_players.txt"
+    file_path = "/minecraft/server/allowed_players.txt"
     player_entry = f"{player_name}:{ip}"
 
     try:
@@ -185,45 +235,47 @@ async def addplayer(ctx, player_name: str, ip: str):
         with open(file_path, "r") as f:
             lines = f.read().splitlines()
             if any(line.startswith(f"{player_name}:") for line in lines):
-                await ctx.send(f"⚠️ O jogador `{player_name}` já está na whitelist com IP `{ip}`.")
+                await interaction.followup.send(f"⚠️ O jogador `{player_name}` já está na whitelist com IP `{ip}`.")
                 return
 
         # Adiciona o player e IP ao arquivo
         with open(file_path, "a") as f:
             f.write(player_entry + "\n")
 
-        await ctx.send(f"✅ O jogador `{player_name}` com IP `{ip}` foi adicionado à whitelist com sucesso.")
+        await interaction.followup.send(f"✅ O jogador `{player_name}` com IP `{ip}` foi adicionado à whitelist com sucesso.")
     except Exception as e:
-        await ctx.send(f"❌ Ocorreu um erro ao tentar adicionar o jogador: `{str(e)}`")
+        await interaction.followup.send(f"❌ Ocorreu um erro ao tentar adicionar o jogador: `{str(e)}`")
 
 # User ID do Maydaz
-def has_permission(ctx, user_id=678217602023292940):
-    return ctx.author.id == user_id
+def has_permission(interaction: discord.Interaction, user_id=678217602023292940):
+    return interaction.user.id == user_id
 
-@bot.command()
-async def give(ctx, player_name: str, item_name: str, amount_input: str = "1"):
-    if not has_permission(ctx):
-        return await ctx.send("⛔ Você não tem permissão para usar este comando.")
+@bot.tree.command(name="give", description="Dá um item ao jogador")
+@app_commands.describe(player_name="Nome do jogador", item_name="Item (ex: minecraft:diamond)", amount_input="Quantidade (padrão 1)")
+async def give(interaction: discord.Interaction, player_name: str, item_name: str, amount_input: str = "1"):
+    await interaction.response.defer(thinking=True)
+    if not has_permission(interaction):
+        return await interaction.followup.send("⛔ Você não tem permissão para usar este comando.")
 
     # Verifica se amount é um número inteiro positivo
     if not amount_input.isdigit():
-        return await ctx.send("❌ Quantidade inválida.")
+        return await interaction.followup.send("❌ Quantidade inválida.")
 
     amount = int(amount_input)
     if amount <= 0:
-        return await ctx.send("❌ A quantidade deve ser maior que zero.")
+        return await interaction.followup.send("❌ A quantidade deve ser maior que zero.")
 
     # Valida nome do jogador
     if not is_valid_player_name(player_name):
-        await ctx.send("❌ Nome de jogador inválido.")
+        await interaction.followup.send("❌ Nome de jogador inválido.")
         return
 
     command = f"give {player_name} {item_name} {amount}"
     try:
         send_command_to_minecraft(command)
-        await ctx.send(f"🎁 O jogador `{player_name}` recebeu {amount} de {item_name}.")
+        await interaction.followup.send(f"🎁 O jogador `{player_name}` recebeu {amount} de {item_name}.")
     except Exception as e:
-        await ctx.send(f"❌ Erro ao dar item: {str(e)}")
+        await interaction.followup.send(f"❌ Erro ao dar item: {str(e)}")
 
 # Inicia o bot com o token
 bot.run(DISCORD_TOKEN)
