@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     curl \
     cron \
+    dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
 # Cria diretórios
@@ -41,7 +42,8 @@ RUN chmod +x /minecraft/*.sh
 
 # Copia script de inicialização
 COPY docker-entrypoint.sh /minecraft/
-RUN chmod +x /minecraft/docker-entrypoint.sh
+RUN dos2unix /minecraft/docker-entrypoint.sh /minecraft/*.sh && \
+    chmod +x /minecraft/docker-entrypoint.sh
 
 # Expõe portas do Minecraft
 EXPOSE 25565
