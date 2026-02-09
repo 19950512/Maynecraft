@@ -1,5 +1,4 @@
 import re
-import html
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -51,6 +50,15 @@ async def on_ready():
 logging.basicConfig(level=logging.INFO)
 
 def send_command_to_minecraft(cmd):
+    """Envia um comando ao console do Minecraft via tmux.
+    O comando é sanitizado para evitar injeção."""
+    # Sanitiza o comando inteiro como camada final de defesa
+    cmd = sanitize_for_minecraft(cmd)
+    if not cmd:
+        raise ValueError("Comando vazio após sanitização.")
+    # Limita tamanho do comando (comandos Minecraft não excedem ~256 chars)
+    if len(cmd) > 300:
+        raise ValueError("Comando excede o tamanho máximo permitido.")
     try:
         subprocess.run(['tmux', 'send-keys', '-t', TMUX_SESSION, cmd, 'Enter'], check=True)
     except subprocess.CalledProcessError as e:
@@ -81,6 +89,31 @@ async def get_last_output_from_minecraft():
 def is_valid_player_name(player_name: str) -> bool:
     return bool(re.fullmatch(r"^[a-zA-Z0-9_]{3,16}$", player_name))
 
+def is_valid_item_name(item_name: str) -> bool:
+    """Valida nomes de itens do Minecraft (ex: minecraft:diamond, stone).
+    Aceita apenas letras minúsculas, números, underscores, e opcionalmente
+    um namespace com ':' (ex: minecraft:diamond_sword)."""
+    return bool(re.fullmatch(r"^[a-z][a-z0-9_]*(:[a-z][a-z0-9_]*)?$", item_name))
+
+def sanitize_for_minecraft(value: str) -> str:
+    """Remove caracteres perigosos que podem ser usados para injeção de
+    comandos via tmux send-keys (newlines, ;, &&, ||, etc.)."""
+    # Remove qualquer caractere de controle (newlines, tabs, etc.)
+    value = re.sub(r"[\x00-\x1f\x7f]", "", value)
+    # Remove caracteres que podem encadear comandos no shell ou no Minecraft
+    value = re.sub(r"[;|&`$\\\"'{}\[\]()!#]", "", value)
+    return value.strip()
+
+def safe_error_message(e: Exception) -> str:
+    """Retorna mensagem de erro segura sem expor caminhos ou detalhes internos."""
+    error_str = str(e)
+    # Remove caminhos absolutos do sistema
+    error_str = re.sub(r"/[\w/.-]+", "[path]", error_str)
+    # Limita tamanho
+    if len(error_str) > 150:
+        error_str = error_str[:150] + "..."
+    return error_str
+
 @bot.tree.command(name="players", description="Mostra os jogadores online")
 async def players(interaction: discord.Interaction):
     try:
@@ -93,7 +126,8 @@ async def players(interaction: discord.Interaction):
         else:
             await interaction.followup.send("❌ Não foi possível obter a lista de jogadores.")
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro ao tentar obter a lista de jogadores: {str(e)}")
+        logging.error(f"Erro no comando players: {e}")
+        await interaction.followup.send("❌ Erro ao tentar obter a lista de jogadores.")
 
 @bot.tree.command(name="comandos", description="Lista os comandos disponíveis")
 async def comandos(interaction: discord.Interaction):
@@ -101,7 +135,12 @@ async def comandos(interaction: discord.Interaction):
         "**📜 Lista de Comandos Disponíveis**\n\n"
         "**👥 Informações de Jogadores**\n"
         "`/players` — Mostra os jogadores online\n"
-        "`/estatisticas <jogador>` — Exibe estatísticas detalhadas\n"
+        "`/estatisticas <jogador>` — Exibe estatísticas detalhadas\n\n"
+        "**✈️ Teleporte (custa 💎 5 diamantes)**\n"
+        "`/teleportar <jogador> <destino>` — Teleporta jogador\n"
+        "  • Destino pode ser: coordenadas `x y z`, `nether`, `end` ou `overworld`\n\n"
+        "**🎒 Kit**\n"
+        "`/kit_inicial <jogador>` — Entrega kit completo para recomeçar após morrer\n\n"
         "**🔧 Administração (Operador do Nether)**\n"
         "`/addplayer <jogador> <ip>` — Adiciona jogador à whitelist (nome:ip)\n"
         "`/kick <jogador>` — Expulsa jogador\n"
@@ -198,7 +237,8 @@ async def kick(interaction: discord.Interaction, player_name: str):
         send_command_to_minecraft(command)
         await interaction.followup.send(f"👢 O jogador `{player_name}` foi expulso do servidor com sucesso.")
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro ao tentar expulsar o jogador: `{str(e)}`")
+        logging.error(f"Erro no comando kick: {e}")
+        await interaction.followup.send(f"❌ Erro ao tentar expulsar o jogador: `{safe_error_message(e)}`")
 
 @bot.tree.command(name="addplayer", description="Adiciona jogador e IP à whitelist personalizada")
 @app_commands.describe(player_name="Nome do jogador", ip="Endereço IP (ex: 172.21.0.1)")
@@ -218,14 +258,14 @@ async def addplayer(interaction: discord.Interaction, player_name: str, ip: str)
         await interaction.followup.send("❌ Nome de jogador inválido.")
         return
 
-    # Validação do IP
+    # Validação do IP (formato + octetos 0-255)
     if not re.fullmatch(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
         await interaction.followup.send("❌ Endereço IP inválido. Formato esperado: 0.0.0.0")
         return
-
-    # Sanitização de entradas
-    player_name = html.escape(player_name)
-    ip = html.escape(ip)
+    octets = ip.split(".")
+    if not all(0 <= int(o) <= 255 for o in octets):
+        await interaction.followup.send("❌ Endereço IP inválido. Cada octeto deve estar entre 0 e 255.")
+        return
 
     file_path = "/minecraft/server/allowed_players.txt"
     player_entry = f"{player_name}:{ip}"
@@ -244,7 +284,8 @@ async def addplayer(interaction: discord.Interaction, player_name: str, ip: str)
 
         await interaction.followup.send(f"✅ O jogador `{player_name}` com IP `{ip}` foi adicionado à whitelist com sucesso.")
     except Exception as e:
-        await interaction.followup.send(f"❌ Ocorreu um erro ao tentar adicionar o jogador: `{str(e)}`")
+        logging.error(f"Erro no comando addplayer: {e}")
+        await interaction.followup.send(f"❌ Ocorreu um erro ao tentar adicionar o jogador: `{safe_error_message(e)}`")
 
 # User ID do Maydaz
 def has_permission(interaction: discord.Interaction, user_id=678217602023292940):
@@ -264,18 +305,190 @@ async def give(interaction: discord.Interaction, player_name: str, item_name: st
     amount = int(amount_input)
     if amount <= 0:
         return await interaction.followup.send("❌ A quantidade deve ser maior que zero.")
+    if amount > 6400:
+        return await interaction.followup.send("❌ Quantidade máxima permitida: 6400.")
 
     # Valida nome do jogador
     if not is_valid_player_name(player_name):
         await interaction.followup.send("❌ Nome de jogador inválido.")
         return
 
+    # Valida nome do item (previne injeção de comandos)
+    if not is_valid_item_name(item_name):
+        return await interaction.followup.send(
+            "❌ Nome de item inválido. Use o formato `minecraft:nome_do_item` "
+            "(apenas letras minúsculas, números e underscores)."
+        )
+
     command = f"give {player_name} {item_name} {amount}"
     try:
         send_command_to_minecraft(command)
-        await interaction.followup.send(f"🎁 O jogador `{player_name}` recebeu {amount} de {item_name}.")
+        await interaction.followup.send(f"🎁 O jogador `{player_name}` recebeu {amount} de `{item_name}`.")
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro ao dar item: {str(e)}")
+        logging.error(f"Erro no comando give: {e}")
+        await interaction.followup.send(f"❌ Erro ao dar item: {safe_error_message(e)}")
+
+# ──────────────────────────────────────────────
+# Teleporte (custa 5 diamantes)
+# ──────────────────────────────────────────────
+
+@bot.tree.command(name="teleportar", description="Teleporta um jogador para coordenadas ou para o Nether (custa 5 diamantes)")
+@app_commands.describe(
+    player_name="Nome do jogador que será teleportado",
+    destino="Coordenadas (x y z) ou 'nether' para ir ao Nether"
+)
+async def teleportar(interaction: discord.Interaction, player_name: str, destino: str):
+    await interaction.response.defer(thinking=True)
+
+    # Apenas quem tem a role ou o dono pode usar
+    role_required = "Operador do Nether"
+    member = interaction.user
+    if isinstance(member, discord.Member):
+        if not (any(role.name == role_required for role in member.roles) or has_permission(interaction)):
+            return await interaction.followup.send("⛔ Você não tem permissão para usar este comando.")
+    else:
+        return await interaction.followup.send("⛔ Comando disponível apenas em servidores.")
+
+    if not is_valid_player_name(player_name):
+        return await interaction.followup.send("❌ Nome de jogador inválido.")
+
+    # Limita tamanho do destino para evitar abuso
+    if len(destino) > 50:
+        return await interaction.followup.send("❌ Destino muito longo.")
+
+    # ── Cobrar 5 diamantes ──
+    # O comando 'clear' com maxCount remove até N itens e retorna quantos removeu.
+    # Se o jogador não tiver 5 diamantes o comando falha.
+    clear_cmd = f"clear {player_name} minecraft:diamond 5"
+    send_command_to_minecraft(clear_cmd)
+    await asyncio.sleep(1.5)
+
+    # Captura a saída para verificar se a cobrança funcionou
+    try:
+        result = subprocess.run(
+            ['tmux', 'capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-20'],
+            capture_output=True, text=True, timeout=5
+        )
+        result.check_returncode()
+        output = result.stdout
+
+        # Se o jogador não tem diamantes suficientes o servidor responde com
+        # "No items were found on player" ou "Removed 0 items"
+        if "No items were found" in output or "Removed 0 items" in output:
+            return await interaction.followup.send(
+                f"💎 O jogador `{player_name}` não possui **5 diamantes** para pagar o teleporte!"
+            )
+    except Exception as e:
+        logging.warning(f"Erro ao verificar pagamento de teleporte: {e}")
+        # Continua mesmo assim — o clear já foi enviado
+
+    # ── Determinar destino ──
+    destino_lower = destino.strip().lower()
+
+    if destino_lower == "nether":
+        # Teleporta para o Nether usando execute in
+        tp_cmd = f"execute in minecraft:the_nether run tp {player_name} 0 80 0"
+        destino_display = "🔥 Nether (0 80 0)"
+    elif destino_lower == "end":
+        tp_cmd = f"execute in minecraft:the_end run tp {player_name} 0 64 0"
+        destino_display = "🌌 End (0 64 0)"
+    elif destino_lower == "overworld":
+        tp_cmd = f"execute in minecraft:overworld run tp {player_name} 0 80 0"
+        destino_display = "🌍 Overworld (0 80 0)"
+    else:
+        # Espera coordenadas x y z
+        coords = destino.strip().split()
+        if len(coords) != 3:
+            return await interaction.followup.send(
+                "❌ Destino inválido. Use coordenadas `x y z` ou uma dimensão: `nether`, `end`, `overworld`."
+            )
+        # Valida se são números (aceita negativos e ~)
+        for c in coords:
+            if c != "~" and not re.fullmatch(r"^~?-?\d+\.?\d*$", c):
+                return await interaction.followup.send(f"❌ Coordenada inválida: `{c}`")
+        tp_cmd = f"tp {player_name} {coords[0]} {coords[1]} {coords[2]}"
+        destino_display = f"📍 ({coords[0]}, {coords[1]}, {coords[2]})"
+
+    try:
+        send_command_to_minecraft(tp_cmd)
+        await interaction.followup.send(
+            f"✈️ `{player_name}` foi teleportado para {destino_display}\n"
+            f"💎 Custo: **5 diamantes** (cobrados do inventário)"
+        )
+    except Exception as e:
+        logging.error(f"Erro no comando teleportar: {e}")
+        await interaction.followup.send(f"❌ Erro ao teleportar: {safe_error_message(e)}")
+
+
+# ──────────────────────────────────────────────
+# Kit Inicial (itens de recomeço após morrer)
+# ──────────────────────────────────────────────
+
+KIT_INICIAL = [
+    # Armadura de diamante
+    ("minecraft:diamond_helmet", 1),
+    ("minecraft:diamond_chestplate", 1),
+    ("minecraft:diamond_leggings", 1),
+    ("minecraft:diamond_boots", 1),
+    # Ferramentas
+    ("minecraft:diamond_pickaxe", 1),
+    ("minecraft:diamond_axe", 1),
+    ("minecraft:diamond_shovel", 1),
+    ("minecraft:diamond_sword", 1),
+    # Escudo
+    ("minecraft:shield", 1),
+    # Comida
+    ("minecraft:cooked_beef", 64),
+    ("minecraft:cooked_beef", 36),
+    # Tochas
+    ("minecraft:torch", 64),
+    # Barco
+    ("minecraft:oak_boat", 1),
+    # Extras úteis
+    ("minecraft:crafting_table", 1),
+    ("minecraft:furnace", 1),
+    ("minecraft:bed", 1),
+    ("minecraft:bucket", 1),
+]
+
+@bot.tree.command(name="kit_inicial", description="Dá o kit completo de recomeço a um jogador (após morrer)")
+@app_commands.describe(player_name="Nome do jogador que receberá o kit")
+async def kit_inicial(interaction: discord.Interaction, player_name: str):
+    await interaction.response.defer(thinking=True)
+
+    # Permissão: role ou dono
+    role_required = "Operador do Nether"
+    member = interaction.user
+    if isinstance(member, discord.Member):
+        if not (any(role.name == role_required for role in member.roles) or has_permission(interaction)):
+            return await interaction.followup.send("⛔ Você não tem permissão para usar este comando.")
+    else:
+        return await interaction.followup.send("⛔ Comando disponível apenas em servidores.")
+
+    if not is_valid_player_name(player_name):
+        return await interaction.followup.send("❌ Nome de jogador inválido.")
+
+    erros = []
+    for item, qty in KIT_INICIAL:
+        try:
+            send_command_to_minecraft(f"give {player_name} {item} {qty}")
+            await asyncio.sleep(0.3)  # Pequeno delay para não sobrecarregar
+        except Exception as e:
+            erros.append(f"{item}: {e}")
+
+    if erros:
+        await interaction.followup.send(
+            f"⚠️ Kit entregue a `{player_name}` com alguns erros:\n"
+            + "\n".join(f"  • {err}" for err in erros)
+        )
+    else:
+        itens_msg = "\n".join(f"  • {qty}× `{item}`" for item, qty in KIT_INICIAL)
+        await interaction.followup.send(
+            f"🎒 **Kit Inicial entregue a `{player_name}`!**\n\n"
+            f"{itens_msg}\n\n"
+            f"Bom recomeço! 💪"
+        )
+
 
 # Inicia o bot com o token
 bot.run(DISCORD_TOKEN)
