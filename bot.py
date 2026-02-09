@@ -356,44 +356,17 @@ async def teleportar(interaction: discord.Interaction, player_name: str, destino
     if len(destino) > 50:
         return await interaction.followup.send("❌ Destino muito longo.")
 
-    # ── Cobrar 5 diamantes ──
-    # O comando 'clear' com maxCount remove até N itens e retorna quantos removeu.
-    # Se o jogador não tiver 5 diamantes o comando falha.
-    clear_cmd = f"clear {player_name} minecraft:diamond 5"
-    send_command_to_minecraft(clear_cmd)
-    await asyncio.sleep(1.5)
-
-    # Captura a saída para verificar se a cobrança funcionou
-    try:
-        result = subprocess.run(
-            ['tmux', 'capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-20'],
-            capture_output=True, text=True, timeout=5
-        )
-        result.check_returncode()
-        output = result.stdout
-
-        # Se o jogador não tem diamantes suficientes o servidor responde com
-        # "No items were found on player" ou "Removed 0 items"
-        if "No items were found" in output or "Removed 0 items" in output:
-            return await interaction.followup.send(
-                f"💎 O jogador `{player_name}` não possui **5 diamantes** para pagar o teleporte!"
-            )
-    except Exception as e:
-        logging.warning(f"Erro ao verificar pagamento de teleporte: {e}")
-        # Continua mesmo assim — o clear já foi enviado
-
-    # ── Determinar destino ──
+    # ── Determinar destino ANTES de cobrar (para não cobrar se o destino for inválido) ──
     destino_lower = destino.strip().lower()
 
     if destino_lower == "nether":
-        # Teleporta para o Nether usando execute in
-        tp_cmd = f"execute in minecraft:the_nether run tp {player_name} 0 80 0"
+        tp_cmd = f"execute as {player_name} in minecraft:the_nether run tp @s 0 80 0"
         destino_display = "🔥 Nether (0 80 0)"
     elif destino_lower == "end":
-        tp_cmd = f"execute in minecraft:the_end run tp {player_name} 0 64 0"
+        tp_cmd = f"execute as {player_name} in minecraft:the_end run tp @s 0 64 0"
         destino_display = "🌌 End (0 64 0)"
     elif destino_lower == "overworld":
-        tp_cmd = f"execute in minecraft:overworld run tp {player_name} 0 80 0"
+        tp_cmd = f"execute as {player_name} in minecraft:overworld run tp @s 0 80 0"
         destino_display = "🌍 Overworld (0 80 0)"
     else:
         # Espera coordenadas x y z
@@ -409,15 +382,76 @@ async def teleportar(interaction: discord.Interaction, player_name: str, destino
         tp_cmd = f"tp {player_name} {coords[0]} {coords[1]} {coords[2]}"
         destino_display = f"📍 ({coords[0]}, {coords[1]}, {coords[2]})"
 
+    # ── Passo 1: Verificar se o jogador tem pelo menos 5 diamantes (sem remover) ──
+    # clear com maxCount=0 apenas CONTA os itens, não remove nenhum
+    check_cmd = f"clear {player_name} minecraft:diamond 0"
+    send_command_to_minecraft(check_cmd)
+    await asyncio.sleep(1.5)
+
+    try:
+        result = subprocess.run(
+            ['tmux', 'capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-20'],
+            capture_output=True, text=True, timeout=5
+        )
+        result.check_returncode()
+        output = result.stdout
+
+        # "No items were found" = 0 diamantes
+        if "No items were found" in output:
+            return await interaction.followup.send(
+                f"💎 O jogador `{player_name}` não possui **5 diamantes** para pagar o teleporte!"
+            )
+
+        # Procura pela quantidade de diamantes encontrados
+        # Formato: "player has N items that match the criteria" (1.20+)
+        # Formato antigo: "Found N matching items" ou similar
+        diamond_count = 0
+        for line in reversed(output.splitlines()):
+            match = re.search(r"(\d+)\s+items?\s+(?:that\s+)?match", line, re.IGNORECASE)
+            if match:
+                diamond_count = int(match.group(1))
+                break
+            # Formato alternativo
+            match2 = re.search(r"[Ff]ound\s+(\d+)", line)
+            if match2:
+                diamond_count = int(match2.group(1))
+                break
+
+        if diamond_count < 5:
+            return await interaction.followup.send(
+                f"💎 O jogador `{player_name}` tem apenas **{diamond_count} diamante(s)**. "
+                f"São necessários **5** para teleportar!"
+            )
+    except Exception as e:
+        logging.warning(f"Erro ao verificar diamantes para teleporte: {e}")
+        return await interaction.followup.send(
+            "❌ Não foi possível verificar os diamantes do jogador. Tente novamente."
+        )
+
+    # ── Passo 2: Cobrar os 5 diamantes ──
+    clear_cmd = f"clear {player_name} minecraft:diamond 5"
+    send_command_to_minecraft(clear_cmd)
+    await asyncio.sleep(1.0)
+
+    # ── Passo 3: Teleportar ──
     try:
         send_command_to_minecraft(tp_cmd)
+        logging.info(f"Teleporte enviado: {tp_cmd}")
         await interaction.followup.send(
             f"✈️ `{player_name}` foi teleportado para {destino_display}\n"
             f"💎 Custo: **5 diamantes** (cobrados do inventário)"
         )
     except Exception as e:
-        logging.error(f"Erro no comando teleportar: {e}")
-        await interaction.followup.send(f"❌ Erro ao teleportar: {safe_error_message(e)}")
+        # Se o teleporte falha, devolve os diamantes
+        logging.error(f"Erro no comando teleportar, devolvendo diamantes: {e}")
+        try:
+            send_command_to_minecraft(f"give {player_name} minecraft:diamond 5")
+        except Exception:
+            pass
+        await interaction.followup.send(
+            f"❌ Erro ao teleportar: {safe_error_message(e)}\n"
+            f"💎 Seus 5 diamantes foram devolvidos."
+        )
 
 
 # ──────────────────────────────────────────────
