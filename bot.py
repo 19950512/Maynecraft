@@ -289,7 +289,7 @@ async def addplayer(interaction: discord.Interaction, player_name: str, ip: str)
 
 # User ID do Maydaz
 def has_permission(interaction: discord.Interaction, user_id=678217602023292940):
-    return interaction.user.id == user_id
+    return interaction.user.id == user_id or interaction.user.id == 270987753640951808
 
 @bot.tree.command(name="give", description="Dá um item ao jogador")
 @app_commands.describe(player_name="Nome do jogador", item_name="Item (ex: minecraft:diamond)", amount_input="Quantidade (padrão 1)")
@@ -483,6 +483,7 @@ KIT_INICIAL = [
     # Barco
     ("minecraft:oak_boat", 1),
     # Extras úteis
+    ("minecraft:red_bed", 1),
     ("minecraft:crafting_table", 1),
     ("minecraft:furnace", 1),
     ("minecraft:bed", 1),
