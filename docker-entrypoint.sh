@@ -68,10 +68,10 @@ forced = {
     'enforce-whitelist': enforce_whitelist_value
 }
 
-# Mescla: template > atual > forçadas
+# Mescla: atual > template > forçadas (template tem prioridade sobre o volume)
 final = {}
-final.update(template)
 final.update(current)
+final.update(template)
 final.update(forced)
 
 # Se há whitelist-names no template, adiciona ao final
