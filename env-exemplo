@@ -33,6 +33,31 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/seu_id/seu_token
 # Exemplo: 123456789012345678
 DISCORD_GUILD_ID=
 
+# MINECRAFT_CHAT_CHANNEL_ID (opcional)
+#  - ID de um canal do Discord. Toda mensagem nesse canal será repassada como
+#    chat in-game (aparece pra todos no jogo prefixado com [Discord]).
+#  - Deixe vazio se não quiser esse encaminhamento automático.
+# Exemplo: 123456789012345678
+MINECRAFT_CHAT_CHANNEL_ID=
+
+# ─────────────────────────────────────────────────────────────────────
+# 🔒 SEGURANÇA / ACESSO AO SERVIDOR
+# ─────────────────────────────────────────────────────────────────────
+#
+# MINECRAFT_ROLE_NAME
+#   Nome do cargo Discord obrigatório para usar comandos do bot E para
+#   entrar no servidor Minecraft. Crie esse cargo no Discord e atribua
+#   apenas aos amigos do Heitor que devem ter acesso.
+#   Padrão: Maynecrafter
+#
+MINECRAFT_ROLE_NAME=Maynecrafter
+
+# WEBSITE_URL
+#   Endereço do site oficial do Heitor (mostrado no /acesso e nas mensagens
+#   de bloqueio para orientar novos jogadores).
+#
+WEBSITE_URL=https://heitormaydana.com.br
+
 # ─────────────────────────────────────────────────────────────────────
 # 🎮 MINECRAFT - OBRIGATÓRIO
 # ─────────────────────────────────────────────────────────────────────

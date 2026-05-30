@@ -1,6 +1,8 @@
 import re
+import json
+import random
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import subprocess
 import asyncio
@@ -16,8 +18,18 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 TMUX_SESSION = os.getenv("TMUX_SESSION", "minecraft")  # Valor padrão 'minecraft' caso não esteja no .env
 GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 
+# ── Segurança: cargo do Discord obrigatório para usar comandos / entrar no jogo
+MINECRAFT_ROLE_NAME = os.getenv("MINECRAFT_ROLE_NAME", "Maynecrafter")
+WEBSITE_URL = os.getenv("WEBSITE_URL", "https://heitormaydana.com.br")
+
+# Caminhos dos arquivos persistentes (dentro do volume server-data)
+MINECRAFT_SERVER_DIR = os.getenv("MINECRAFT_DIR", "/minecraft/server")
+ALLOWED_PLAYERS_FILE = os.path.join(MINECRAFT_SERVER_DIR, "allowed_players.txt")
+REGISTRATIONS_FILE = os.path.join(MINECRAFT_SERVER_DIR, "discord_registrations.json")
+
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True  # necessário para detectar mudanças de cargo (revogar whitelist)
 
 class MayneBot(commands.Bot):
     async def setup_hook(self):
@@ -35,6 +47,111 @@ class MayneBot(commands.Bot):
 
 bot = MayneBot(command_prefix='!', intents=intents)
 
+# ──────────────────────────────────────────────
+# Camada de segurança: cargo Discord obrigatório
+# ──────────────────────────────────────────────
+# Comandos que QUALQUER pessoa pode usar (sem cargo). Servem para orientar
+# novos visitantes sobre como obter acesso.
+COMANDOS_PUBLICOS = {"comandos", "acesso"}
+
+
+def tem_cargo_minecraft(member: discord.abc.User) -> bool:
+    """True se o membro do Discord tem o cargo configurado em MINECRAFT_ROLE_NAME."""
+    if not isinstance(member, discord.Member):
+        return False
+    return any(role.name == MINECRAFT_ROLE_NAME for role in member.roles)
+
+
+async def _global_interaction_check(interaction: discord.Interaction) -> bool:
+    """Executado antes de qualquer slash command. Bloqueia quem não tem o cargo."""
+    cmd_name = interaction.command.name if interaction.command else ""
+    if cmd_name in COMANDOS_PUBLICOS:
+        return True
+    if not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "⛔ Esses comandos só funcionam dentro do servidor Discord do Heitor.",
+            ephemeral=True,
+        )
+        return False
+    if not tem_cargo_minecraft(interaction.user):
+        await interaction.response.send_message(
+            f"🔒 **Acesso restrito!** Você precisa do cargo `{MINECRAFT_ROLE_NAME}` para usar os comandos.\n"
+            f"👉 Veja como conseguir em: {WEBSITE_URL}\n"
+            f"💡 Use `/acesso` para mais informações.",
+            ephemeral=True,
+        )
+        return False
+    return True
+
+
+bot.tree.interaction_check = _global_interaction_check
+
+
+# ──────────────────────────────────────────────
+# Registro Discord ↔ Minecraft (whitelist)
+# ──────────────────────────────────────────────
+
+def _carregar_registros() -> dict:
+    try:
+        with open(REGISTRATIONS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _salvar_registros(data: dict) -> None:
+    os.makedirs(os.path.dirname(REGISTRATIONS_FILE), exist_ok=True)
+    tmp = REGISTRATIONS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, REGISTRATIONS_FILE)
+
+
+def _whitelist_add(player_name: str) -> bool:
+    """Adiciona 'nome:any' ao allowed_players.txt se ainda não estiver lá."""
+    os.makedirs(os.path.dirname(ALLOWED_PLAYERS_FILE), exist_ok=True)
+    linhas = []
+    if os.path.exists(ALLOWED_PLAYERS_FILE):
+        with open(ALLOWED_PLAYERS_FILE) as f:
+            linhas = f.read().splitlines()
+    for linha in linhas:
+        if linha.split(":", 1)[0].strip().lower() == player_name.lower():
+            return False
+    with open(ALLOWED_PLAYERS_FILE, "a") as f:
+        f.write(f"{player_name}:any\n")
+    return True
+
+
+def _whitelist_remove(player_name: str) -> bool:
+    if not os.path.exists(ALLOWED_PLAYERS_FILE):
+        return False
+    with open(ALLOWED_PLAYERS_FILE) as f:
+        linhas = f.read().splitlines()
+    novas = [l for l in linhas if l.split(":", 1)[0].strip().lower() != player_name.lower()]
+    if len(novas) == len(linhas):
+        return False
+    with open(ALLOWED_PLAYERS_FILE, "w") as f:
+        f.write("\n".join(novas) + ("\n" if novas else ""))
+    return True
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """Se o cargo Minecraft for revogado, remove o nick da whitelist e kicka."""
+    tinha = any(r.name == MINECRAFT_ROLE_NAME for r in before.roles)
+    tem = any(r.name == MINECRAFT_ROLE_NAME for r in after.roles)
+    if tinha and not tem:
+        regs = _carregar_registros()
+        nick = regs.get(str(after.id))
+        if nick:
+            if _whitelist_remove(nick):
+                logging.info(f"Removido {nick} da whitelist (cargo revogado de {after})")
+                try:
+                    send_command_to_minecraft(f"kick {nick} Acesso removido")
+                except Exception:
+                    pass
+
+
 @bot.event
 async def on_ready():
     try:
@@ -45,6 +162,77 @@ async def on_ready():
             logging.info(f"Slash commands sincronizados via on_ready para guild {guild.id} ({guild.name})")
     except Exception as e:
         logging.error(f"Falha ao sincronizar slash commands em on_ready: {e}")
+
+    # Inicia atualização periódica da presença mostrando jogadores online
+    if not atualizar_presenca.is_running():
+        atualizar_presenca.start()
+
+
+@tasks.loop(seconds=60)
+async def atualizar_presenca():
+    """Atualiza a presença do bot a cada minuto mostrando os jogadores online."""
+    try:
+        send_command_to_minecraft("list")
+        await asyncio.sleep(1.2)
+        output = await get_last_output_from_minecraft()
+        # Tenta extrair número de jogadores online de saídas tipo
+        # "There are 2 of a max of 18 players online: ..."
+        match = re.search(r"There are\s+(\d+)\s+of\s+a\s+max\s+of\s+(\d+)", output)
+        if match:
+            online = int(match.group(1))
+            maximo = int(match.group(2))
+            if online == 0:
+                texto = "esperando o Heitor chegar 💤"
+            elif online == 1:
+                texto = f"com {online} jogador no servidor 🎮"
+            else:
+                texto = f"com {online}/{maximo} jogadores 🎮"
+        else:
+            texto = "no Maynecraft do Heitor 🟢"
+        await bot.change_presence(activity=discord.Game(name=texto))
+    except Exception as e:
+        logging.debug(f"Falha ao atualizar presença: {e}")
+
+
+@atualizar_presenca.before_loop
+async def _esperar_pronto():
+    await bot.wait_until_ready()
+
+
+# ──────────────────────────────────────────────
+# Encaminhamento Discord → Minecraft (chat in-game)
+# ──────────────────────────────────────────────
+# Se a variável MINECRAFT_CHAT_CHANNEL_ID estiver definida com o ID de um canal
+# Discord, toda mensagem nesse canal é repassada ao chat in-game como [Discord].
+CHAT_CHANNEL_ID = os.getenv("MINECRAFT_CHAT_CHANNEL_ID")
+try:
+    CHAT_CHANNEL_ID = int(CHAT_CHANNEL_ID) if CHAT_CHANNEL_ID else None
+except ValueError:
+    CHAT_CHANNEL_ID = None
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    # Evita loops com o próprio bot e webhooks
+    if message.author.bot:
+        return
+    if CHAT_CHANNEL_ID and message.channel.id == CHAT_CHANNEL_ID and message.content:
+        autor = sanitize_for_minecraft(message.author.display_name)[:20] or "Discord"
+        texto = sanitize_for_minecraft(message.content)[:200]
+        if texto:
+            try:
+                # tellraw para colorir e diferenciar do chat normal
+                tellraw = (
+                    f'tellraw @a ["",'
+                    f'{{"text":"[Discord] ","color":"aqua","bold":true}},'
+                    f'{{"text":"{autor}","color":"yellow"}},'
+                    f'{{"text":": ","color":"white"}},'
+                    f'{{"text":"{texto}","color":"white"}}]'
+                )
+                send_command_to_minecraft(tellraw)
+            except Exception as e:
+                logging.warning(f"Falha ao encaminhar mensagem para o jogo: {e}")
+    await bot.process_commands(message)
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
@@ -131,22 +319,216 @@ async def players(interaction: discord.Interaction):
 
 @bot.tree.command(name="comandos", description="Lista os comandos disponíveis")
 async def comandos(interaction: discord.Interaction):
-    msg = (
-        "**📜 Lista de Comandos Disponíveis**\n\n"
-        "**👥 Informações de Jogadores**\n"
-        "`/players` — Mostra os jogadores online\n"
-        "`/estatisticas <jogador>` — Exibe estatísticas detalhadas\n\n"
-        "**✈️ Teleporte (custa 💎 5 diamantes)**\n"
-        "`/teleportar <jogador> <destino>` — Teleporta jogador\n"
-        "  • Destino pode ser: coordenadas `x y z`, `nether`, `end` ou `overworld`\n\n"
-        "**🎒 Kit**\n"
-        "`/kit_inicial <jogador>` — Entrega kit completo para recomeçar após morrer\n\n"
-        "**🔧 Administração (Operador do Nether)**\n"
-        "`/addplayer <jogador> <ip>` — Adiciona jogador à whitelist (nome:ip)\n"
-        "`/kick <jogador>` — Expulsa jogador\n"
-        "`/give <jogador> <item> [quantidade]` — Dá item ao jogador\n"
+    embed = discord.Embed(
+        title="🎮 Comandos do Servidor do Heitor Maydana",
+        description=(
+            f"Servidor privado por convite — saiba mais em **{WEBSITE_URL}** ✨\n"
+            f"Precisa do cargo `{MINECRAFT_ROLE_NAME}` para usar a maioria dos comandos."
+        ),
+        color=0x00BFFF,
     )
-    await interaction.response.send_message(msg)
+    embed.add_field(
+        name="🔒 Acesso (todos podem usar)",
+        value=(
+            "`/acesso` — Como entrar no servidor\n"
+            "`/registrar <nick>` — Vincula seu Discord ao nick Minecraft\n"
+            "`/meu_nick` — Mostra seu nick registrado\n"
+            "`/desregistrar` — Remove seu nick da whitelist\n"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="😄 Diversão (para todos)",
+        value=(
+            "`/oi` — Receba uma saudação fofa\n"
+            "`/piada` — Conta uma piada infantil\n"
+            "`/dado [lados]` — Rola um dado (padrão 6)\n"
+            "`/ranking` — Top 3 em tempo de jogo\n"
+            "`/players` — Mostra jogadores online\n"
+            "`/conversar <mensagem>` — Manda recado pro chat do jogo\n"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="☀️ Clima e tempo (Operador do Nether)",
+        value=(
+            "`/dia` — Faz nascer o sol 🌞\n"
+            "`/noite` — Cai a noite 🌙\n"
+            "`/sol` — Tempo limpo ☀️\n"
+            "`/chuva` — Faz chover 🌧️\n"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="💎 Magias (custam diamantes do inventário)",
+        value=(
+            "`/curar <jogador>` — Cura tudo (2 💎)\n"
+            "`/voar <jogador>` — Habilita voo por 3 min (3 💎)\n"
+            "`/efeito <jogador> <efeito>` — Aplica efeito mágico (2 💎)\n"
+            "`/mascote <jogador> <tipo>` — Invoca bichinho dócil (5 💎)\n"
+            "`/foguete <jogador>` — Lança um foguetão 🚀 (1 💎)\n"
+            "`/teleportar <jogador> <destino>` — Teleporta (5 💎)\n"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📊 Outros",
+        value=(
+            "`/estatisticas <jogador>` — Estatísticas detalhadas\n"
+            "`/kit_inicial <jogador>` — Kit completo para recomeçar\n"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🔧 Administração",
+        value=(
+            "`/addplayer <jogador> <ip>` — Adiciona à whitelist\n"
+            "`/kick <jogador>` — Expulsa jogador\n"
+            "`/give <jogador> <item> [qty]` — Dá item ao jogador\n"
+            "`/anunciar <mensagem>` — Anuncia no servidor\n"
+            "`/remover_acesso <@usuário>` — Revoga acesso total\n"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Servidor do Heitor Maydana • bom jogo!")
+    await interaction.response.send_message(embed=embed)
+
+
+# ──────────────────────────────────────────────
+# Acesso (público) e Registro de nick Minecraft
+# ──────────────────────────────────────────────
+
+@bot.tree.command(name="acesso", description="Como ganhar acesso ao servidor Minecraft do Heitor")
+async def acesso(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🔒 Como entrar no Maynecraft do Heitor",
+        description=(
+            f"O servidor é **privado** — só amigos do Heitor entram! 💚\n\n"
+            f"**Passo a passo:**\n"
+            f"1️⃣ Acesse **{WEBSITE_URL}** e siga as instruções para entrar no Discord.\n"
+            f"2️⃣ Peça o cargo **`{MINECRAFT_ROLE_NAME}`** ao Heitor ou aos pais dele.\n"
+            f"3️⃣ Com o cargo, use `/registrar <seu_nick_minecraft>` aqui no Discord.\n"
+            f"4️⃣ Pronto! Conecte no servidor Minecraft 🎮"
+        ),
+        color=0x5865F2,
+    )
+    embed.add_field(
+        name="❓ Já tenho o cargo, e agora?",
+        value="Use `/registrar SeuNick` para liberar seu nick na whitelist.",
+        inline=False,
+    )
+    embed.add_field(
+        name="🌐 Site oficial",
+        value=WEBSITE_URL,
+        inline=False,
+    )
+    embed.set_footer(text="Servidor do Heitor Maydana • acesso por convite")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="registrar", description="Registra seu nick Minecraft e libera entrada no servidor")
+@app_commands.describe(nick="Seu nome de usuário no Minecraft (3-16 caracteres)")
+async def registrar(interaction: discord.Interaction, nick: str):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    if not is_valid_player_name(nick):
+        return await interaction.followup.send(
+            "❌ Nick inválido. Use 3-16 caracteres (letras, números, underscore).",
+            ephemeral=True,
+        )
+
+    regs = _carregar_registros()
+    user_id = str(interaction.user.id)
+
+    # Já existe registro para este Discord?
+    if user_id in regs and regs[user_id].lower() != nick.lower():
+        nick_antigo = regs[user_id]
+        # Remove o antigo da whitelist
+        _whitelist_remove(nick_antigo)
+        logging.info(f"{interaction.user} mudou o nick de {nick_antigo} para {nick}")
+
+    # Verifica se nick já está em uso por OUTRO usuário
+    for uid, n in regs.items():
+        if uid != user_id and n.lower() == nick.lower():
+            return await interaction.followup.send(
+                f"⛔ O nick `{nick}` já foi registrado por outra pessoa no Discord. "
+                f"Use um nick diferente ou peça ao Heitor para resolver.",
+                ephemeral=True,
+            )
+
+    regs[user_id] = nick
+    _salvar_registros(regs)
+    novo = _whitelist_add(nick)
+
+    msg = (
+        f"✅ Nick `{nick}` registrado com sucesso!\n"
+        f"{'🆕 Adicionado à whitelist.' if novo else '♻️ Já estava na whitelist.'}\n"
+        f"🎮 Conecte agora no Minecraft."
+    )
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@bot.tree.command(name="meu_nick", description="Mostra qual nick Minecraft está vinculado ao seu Discord")
+async def meu_nick(interaction: discord.Interaction):
+    regs = _carregar_registros()
+    nick = regs.get(str(interaction.user.id))
+    if nick:
+        await interaction.response.send_message(
+            f"🎮 Seu nick registrado é: **`{nick}`**", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            "ℹ️ Você ainda não registrou. Use `/registrar <seu_nick>`.", ephemeral=True
+        )
+
+
+@bot.tree.command(name="desregistrar", description="Remove seu nick Minecraft do servidor (você pode registrar outro depois)")
+async def desregistrar(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    regs = _carregar_registros()
+    user_id = str(interaction.user.id)
+    nick = regs.pop(user_id, None)
+    if not nick:
+        return await interaction.followup.send("ℹ️ Você não tinha nick registrado.", ephemeral=True)
+    _salvar_registros(regs)
+    _whitelist_remove(nick)
+    try:
+        send_command_to_minecraft(f"kick {nick} Voce se desregistrou")
+    except Exception:
+        pass
+    await interaction.followup.send(
+        f"🗑️ Nick `{nick}` removido da whitelist. Você pode registrar outro com `/registrar`.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="remover_acesso", description="(Admin) Remove o acesso de um usuário do Discord ao Minecraft")
+@app_commands.describe(membro="Usuário do Discord que perderá o acesso")
+async def remover_acesso(interaction: discord.Interaction, membro: discord.Member):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    if not has_permission(interaction):
+        return await interaction.followup.send("⛔ Apenas o Heitor ou o pai podem usar este comando.", ephemeral=True)
+    regs = _carregar_registros()
+    nick = regs.pop(str(membro.id), None)
+    if nick:
+        _salvar_registros(regs)
+        _whitelist_remove(nick)
+        try:
+            send_command_to_minecraft(f"kick {nick} Acesso removido por admin")
+        except Exception:
+            pass
+    # Remove o cargo, se possível
+    role = discord.utils.get(membro.guild.roles, name=MINECRAFT_ROLE_NAME)
+    if role and role in membro.roles:
+        try:
+            await membro.remove_roles(role, reason="Acesso revogado via /remover_acesso")
+        except discord.Forbidden:
+            pass
+    await interaction.followup.send(
+        f"🚫 Acesso de {membro.mention} removido."
+        + (f" Nick `{nick}` retirado da whitelist." if nick else ""),
+        ephemeral=True,
+    )
 
 @bot.tree.command(name="estatisticas", description="Exibe estatísticas de um jogador")
 @app_commands.describe(player_name="Nome do jogador (3-16 chars)")
@@ -456,6 +838,404 @@ async def teleportar(interaction: discord.Interaction, player_name: str, destino
             f"❌ Erro ao teleportar: {safe_error_message(e)}\n"
             f"💎 Seus 5 diamantes foram devolvidos."
         )
+
+
+# ──────────────────────────────────────────────
+# Helpers de permissão e cobrança em diamantes
+# ──────────────────────────────────────────────
+
+ROLE_OPERADOR = "Operador do Nether"
+
+
+def tem_role_operador(interaction: discord.Interaction) -> bool:
+    """True se o usuário é Operador do Nether OU é o dono (has_permission)."""
+    member = interaction.user
+    if has_permission(interaction):
+        return True
+    if isinstance(member, discord.Member):
+        return any(role.name == ROLE_OPERADOR for role in member.roles)
+    return False
+
+
+async def cobrar_diamantes(player_name: str, quantidade: int) -> tuple[bool, int, str]:
+    """Tenta remover ``quantidade`` diamantes do inventário do jogador.
+
+    Retorna (sucesso, removidos, mensagem_erro). Em caso de removidos<quantidade,
+    devolve o que foi cobrado antes de retornar.
+    """
+    try:
+        send_command_to_minecraft(f"clear {player_name} minecraft:diamond {quantidade}")
+        await asyncio.sleep(1.5)
+        result = subprocess.run(
+            ['tmux', 'capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-20'],
+            capture_output=True, text=True, timeout=5,
+        )
+        result.check_returncode()
+        removidos = 0
+        for line in reversed(result.stdout.splitlines()):
+            m = re.search(r"[Rr]emoved\s+(\d+)\s+item", line)
+            if m:
+                removidos = int(m.group(1))
+                break
+            if "No items were found" in line:
+                removidos = 0
+                break
+    except Exception as e:
+        logging.warning(f"Falha ao cobrar diamantes de {player_name}: {e}")
+        return False, 0, "❌ Não foi possível verificar o pagamento. Tente novamente."
+
+    if removidos == 0:
+        return False, 0, f"💎 `{player_name}` não tem **nenhum diamante** no inventário!"
+    if removidos < quantidade:
+        # devolve o que foi cobrado
+        try:
+            send_command_to_minecraft(f"give {player_name} minecraft:diamond {removidos}")
+        except Exception:
+            pass
+        return (
+            False,
+            removidos,
+            f"💎 `{player_name}` tem só **{removidos} diamante(s)**, precisa de **{quantidade}**. "
+            f"Devolvi o que cobrei. 🔄",
+        )
+    return True, removidos, ""
+
+
+# ──────────────────────────────────────────────
+# Comandos divertidos (para todos)
+# ──────────────────────────────────────────────
+
+SAUDACOES = [
+    "Oiêêê, {user}! 👋 Bora minerar?",
+    "Eaí {user}! 🎮 Pega a picareta e vem!",
+    "Salveeee {user}! ⚒️ Que bom te ver no servidor do Heitor!",
+    "{user}, você é demais! 💚 Bom jogo!",
+    "Oi {user}! 🐷🐮 Os bichinhos estão te esperando!",
+]
+
+PIADAS = [
+    ("Por que o Creeper não usa elevador?", "Porque ele sempre **explode** no caminho! 💥"),
+    ("O que o zumbi disse ao Steve?", "Para de me **assustar**, eu acabei de acordar! 🧟"),
+    ("Como o Enderman atende o telefone?", "**Teleporta** e diz alô! 📞"),
+    ("O que a vaca do Minecraft come?", "Bloco de **rações**! 🐄"),
+    ("Por que o esqueleto não foi à festa?", "Porque ele não tinha **corpo** pra ir! 💀"),
+    ("Qual o lanche favorito do Steve?", "Um **bloco** de queijo! 🧀"),
+    ("Por que o porco virou bacon?", "Porque caiu um **raio** nele! ⚡🐖"),
+    ("O que o Aldeão disse pro outro?", "**Hmmmm!** 🧑\u200d🌾"),
+    ("Por que o lobo é amigo do Steve?", "Porque ele deu um **osso** de presente! 🦴🐺"),
+    ("Qual o bloco mais educado?", "O **TNT**, porque sempre se **apresenta** com estrondo! 🧨"),
+]
+
+
+@bot.tree.command(name="oi", description="Receba uma saudação fofa do bot")
+async def oi(interaction: discord.Interaction):
+    nome = interaction.user.display_name
+    msg = random.choice(SAUDACOES).format(user=nome)
+    await interaction.response.send_message(msg)
+
+
+@bot.tree.command(name="piada", description="Conta uma piada infantil de Minecraft")
+async def piada(interaction: discord.Interaction):
+    pergunta, resposta = random.choice(PIADAS)
+    embed = discord.Embed(title="😂 Piada do Maynecraft", color=0xFFD700)
+    embed.add_field(name="🤔 " + pergunta, value="||" + resposta + "||", inline=False)
+    embed.set_footer(text="Clique no borrão pra ver a resposta!")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="dado", description="Rola um dado")
+@app_commands.describe(lados="Número de lados do dado (2-100, padrão 6)")
+async def dado(interaction: discord.Interaction, lados: int = 6):
+    if lados < 2 or lados > 100:
+        return await interaction.response.send_message("❌ O dado precisa ter entre 2 e 100 lados.")
+    valor = random.randint(1, lados)
+    await interaction.response.send_message(
+        f"🎲 {interaction.user.display_name} rolou um **D{lados}** e tirou **{valor}**!"
+    )
+
+
+@bot.tree.command(name="ranking", description="Top 3 jogadores em tempo de jogo")
+async def ranking(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    try:
+        # Lista jogadores online + offline na whitelist
+        nomes = set()
+        try:
+            with open("/minecraft/server/allowed_players.txt") as f:
+                for linha in f:
+                    n = linha.split(":")[0].strip()
+                    if n and is_valid_player_name(n):
+                        nomes.add(n)
+        except FileNotFoundError:
+            pass
+        if not nomes:
+            return await interaction.followup.send("❌ Nenhum jogador na whitelist ainda.")
+
+        stats = []
+        for nome in nomes:
+            try:
+                send_command_to_minecraft(f"scoreboard players get {nome} playtime")
+                await asyncio.sleep(0.4)
+                result = subprocess.run(
+                    ['tmux', 'capture-pane', '-t', TMUX_SESSION, '-p', '-S', '-10'],
+                    capture_output=True, text=True, timeout=3,
+                )
+                output = result.stdout.splitlines()
+                for line in reversed(output):
+                    m = re.search(rf"{re.escape(nome)} has (\d+) \[playtime\]", line)
+                    if m:
+                        stats.append((nome, int(m.group(1))))
+                        break
+            except Exception:
+                continue
+
+        if not stats:
+            return await interaction.followup.send("❌ Nenhuma estatística encontrada ainda. Joguem mais! 🎮")
+
+        stats.sort(key=lambda x: x[1], reverse=True)
+        medalhas = ["🥇", "🥈", "🥉"]
+        embed = discord.Embed(title="🏆 Top jogadores — Tempo de jogo", color=0xFFD700)
+        for i, (nome, ticks) in enumerate(stats[:3]):
+            minutos = round(ticks / 1200, 1)
+            embed.add_field(
+                name=f"{medalhas[i]} {nome}",
+                value=f"{minutos} minutos jogados",
+                inline=False,
+            )
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        logging.error(f"Erro no ranking: {e}")
+        await interaction.followup.send(f"❌ Erro no ranking: {safe_error_message(e)}")
+
+
+@bot.tree.command(name="conversar", description="Manda recado pro chat do jogo")
+@app_commands.describe(mensagem="Mensagem para aparecer no chat in-game")
+async def conversar(interaction: discord.Interaction, mensagem: str):
+    autor = sanitize_for_minecraft(interaction.user.display_name)[:20] or "Discord"
+    texto = sanitize_for_minecraft(mensagem)[:200]
+    if not texto:
+        return await interaction.response.send_message("❌ Mensagem vazia após filtragem.")
+    tellraw = (
+        f'tellraw @a ["",'
+        f'{{"text":"[Discord] ","color":"aqua","bold":true}},'
+        f'{{"text":"{autor}","color":"yellow"}},'
+        f'{{"text":": ","color":"white"}},'
+        f'{{"text":"{texto}","color":"white"}}]'
+    )
+    try:
+        send_command_to_minecraft(tellraw)
+        await interaction.response.send_message(f"💬 Enviado pro chat: *{texto}*")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Erro: {safe_error_message(e)}")
+
+
+# ──────────────────────────────────────────────
+# Comandos de Clima e Tempo (Operador)
+# ──────────────────────────────────────────────
+
+async def _comando_simples_op(interaction: discord.Interaction, comando_mc: str, mensagem_ok: str):
+    await interaction.response.defer(thinking=True)
+    if not tem_role_operador(interaction):
+        return await interaction.followup.send("⛔ Você não tem permissão para usar este comando.")
+    try:
+        send_command_to_minecraft(comando_mc)
+        await interaction.followup.send(mensagem_ok)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {safe_error_message(e)}")
+
+
+@bot.tree.command(name="dia", description="Faz nascer o sol no servidor 🌞")
+async def dia(interaction: discord.Interaction):
+    await _comando_simples_op(interaction, "time set day", "🌞 O sol nasceu! Bom dia, Maynecraft!")
+
+
+@bot.tree.command(name="noite", description="Cai a noite no servidor 🌙")
+async def noite(interaction: discord.Interaction):
+    await _comando_simples_op(interaction, "time set night", "🌙 A noite chegou... cuidado com os monstros!")
+
+
+@bot.tree.command(name="sol", description="Limpa o tempo (sem chuva) ☀️")
+async def sol(interaction: discord.Interaction):
+    await _comando_simples_op(interaction, "weather clear", "☀️ Tempo limpo! Dia perfeito pra construir!")
+
+
+@bot.tree.command(name="chuva", description="Faz chover no servidor 🌧️")
+async def chuva(interaction: discord.Interaction):
+    await _comando_simples_op(interaction, "weather rain", "🌧️ Está chovendo! Hora de pegar uma capa!")
+
+
+@bot.tree.command(name="anunciar", description="Anuncia uma mensagem no servidor")
+@app_commands.describe(mensagem="Mensagem para anunciar a todos")
+async def anunciar(interaction: discord.Interaction, mensagem: str):
+    await interaction.response.defer(thinking=True)
+    if not tem_role_operador(interaction):
+        return await interaction.followup.send("⛔ Você não tem permissão para usar este comando.")
+    texto = sanitize_for_minecraft(mensagem)[:200]
+    if not texto:
+        return await interaction.followup.send("❌ Mensagem vazia após filtragem.")
+    tellraw = f'tellraw @a [{{"text":"📢 ","color":"gold","bold":true}},{{"text":"{texto}","color":"yellow"}}]'
+    try:
+        send_command_to_minecraft(tellraw)
+        await interaction.followup.send(f"📢 Anunciado: *{texto}*")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {safe_error_message(e)}")
+
+
+# ──────────────────────────────────────────────
+# Magias (custam diamantes)
+# ──────────────────────────────────────────────
+
+@bot.tree.command(name="curar", description="Cura o jogador (custa 2 diamantes)")
+@app_commands.describe(player_name="Jogador que será curado")
+async def curar(interaction: discord.Interaction, player_name: str):
+    await interaction.response.defer(thinking=True)
+    if not is_valid_player_name(player_name):
+        return await interaction.followup.send("❌ Nome de jogador inválido.")
+    ok, _, erro = await cobrar_diamantes(player_name, 2)
+    if not ok:
+        return await interaction.followup.send(erro)
+    try:
+        send_command_to_minecraft(f"effect give {player_name} minecraft:instant_health 1 5 true")
+        send_command_to_minecraft(f"effect give {player_name} minecraft:saturation 5 5 true")
+        send_command_to_minecraft(
+            f'tellraw {player_name} [{{"text":"💖 Você foi curado! Vida e fome cheias!","color":"light_purple"}}]'
+        )
+        await interaction.followup.send(f"💖 `{player_name}` foi curado completamente! (2 💎)")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {safe_error_message(e)}")
+
+
+@bot.tree.command(name="voar", description="Habilita voo por 3 minutos (custa 3 diamantes)")
+@app_commands.describe(player_name="Jogador que ganhará o voo")
+async def voar(interaction: discord.Interaction, player_name: str):
+    await interaction.response.defer(thinking=True)
+    if not is_valid_player_name(player_name):
+        return await interaction.followup.send("❌ Nome de jogador inválido.")
+    ok, _, erro = await cobrar_diamantes(player_name, 3)
+    if not ok:
+        return await interaction.followup.send(erro)
+    try:
+        # levitation dura 180s (3 min); slow_falling pra não morrer ao acabar
+        send_command_to_minecraft(f"effect give {player_name} minecraft:levitation 180 1 true")
+        send_command_to_minecraft(f"effect give {player_name} minecraft:slow_falling 200 0 true")
+        send_command_to_minecraft(
+            f'tellraw {player_name} [{{"text":"🪽 Você pode voar por 3 minutos!","color":"aqua"}}]'
+        )
+        await interaction.followup.send(f"🪽 `{player_name}` está flutuando! (3 💎)")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {safe_error_message(e)}")
+
+
+EFEITOS_DISPONIVEIS = {
+    "forca": ("minecraft:strength", 60, 1, "💪 Força máxima!"),
+    "velocidade": ("minecraft:speed", 120, 2, "💨 Super veloz!"),
+    "invisivel": ("minecraft:invisibility", 60, 0, "👻 Invisível!"),
+    "saltar": ("minecraft:jump_boost", 120, 2, "🦘 Pula alto!"),
+    "respiracao": ("minecraft:water_breathing", 180, 0, "🐟 Respira na água!"),
+    "noturna": ("minecraft:night_vision", 300, 0, "🌃 Visão noturna!"),
+    "fogo": ("minecraft:fire_resistance", 120, 0, "🔥 Imune ao fogo!"),
+}
+
+
+@bot.tree.command(name="efeito", description="Aplica um efeito mágico (custa 2 diamantes)")
+@app_commands.describe(
+    player_name="Jogador",
+    efeito="Tipo de efeito",
+)
+@app_commands.choices(efeito=[
+    app_commands.Choice(name="💪 Força", value="forca"),
+    app_commands.Choice(name="💨 Velocidade", value="velocidade"),
+    app_commands.Choice(name="👻 Invisível", value="invisivel"),
+    app_commands.Choice(name="🦘 Saltar alto", value="saltar"),
+    app_commands.Choice(name="🐟 Respirar água", value="respiracao"),
+    app_commands.Choice(name="🌃 Visão noturna", value="noturna"),
+    app_commands.Choice(name="🔥 Imune ao fogo", value="fogo"),
+])
+async def efeito(interaction: discord.Interaction, player_name: str, efeito: app_commands.Choice[str]):
+    await interaction.response.defer(thinking=True)
+    if not is_valid_player_name(player_name):
+        return await interaction.followup.send("❌ Nome de jogador inválido.")
+    if efeito.value not in EFEITOS_DISPONIVEIS:
+        return await interaction.followup.send("❌ Efeito desconhecido.")
+    ok, _, erro = await cobrar_diamantes(player_name, 2)
+    if not ok:
+        return await interaction.followup.send(erro)
+    mc_id, duracao, nivel, mensagem = EFEITOS_DISPONIVEIS[efeito.value]
+    try:
+        send_command_to_minecraft(f"effect give {player_name} {mc_id} {duracao} {nivel} true")
+        send_command_to_minecraft(
+            f'tellraw {player_name} [{{"text":"✨ {mensagem}","color":"light_purple"}}]'
+        )
+        await interaction.followup.send(
+            f"✨ `{player_name}` recebeu **{efeito.name}** por {duracao}s! (2 💎)"
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {safe_error_message(e)}")
+
+
+MASCOTES = {
+    "lobo": ("minecraft:wolf", "{Tame:1b,CollarColor:14}", "🐺 Um lobinho dócil aparece!"),
+    "gato": ("minecraft:cat", "{Tame:1b}", "🐱 Um gatinho ronrona perto de você!"),
+    "papagaio": ("minecraft:parrot", "{Tame:1b,Variant:0}", "🦜 Um papagaio colorido pousa no seu ombro!"),
+    "cavalo": ("minecraft:horse", "{Tame:1b,SaddleItem:{id:\"minecraft:saddle\",Count:1b}}", "🐴 Um cavalo selado aparece!"),
+    "raposa": ("minecraft:fox", "{Trusted:[I;0,0,0,0]}", "🦊 Uma raposinha bondosa aparece!"),
+}
+
+
+@bot.tree.command(name="mascote", description="Invoca um bichinho dócil (custa 5 diamantes)")
+@app_commands.describe(player_name="Dono do bichinho", tipo="Tipo de bichinho")
+@app_commands.choices(tipo=[
+    app_commands.Choice(name="🐺 Lobo", value="lobo"),
+    app_commands.Choice(name="🐱 Gato", value="gato"),
+    app_commands.Choice(name="🦜 Papagaio", value="papagaio"),
+    app_commands.Choice(name="🐴 Cavalo", value="cavalo"),
+    app_commands.Choice(name="🦊 Raposa", value="raposa"),
+])
+async def mascote(interaction: discord.Interaction, player_name: str, tipo: app_commands.Choice[str]):
+    await interaction.response.defer(thinking=True)
+    if not is_valid_player_name(player_name):
+        return await interaction.followup.send("❌ Nome de jogador inválido.")
+    if tipo.value not in MASCOTES:
+        return await interaction.followup.send("❌ Bichinho desconhecido.")
+    ok, _, erro = await cobrar_diamantes(player_name, 5)
+    if not ok:
+        return await interaction.followup.send(erro)
+    mob_id, nbt, mensagem = MASCOTES[tipo.value]
+    try:
+        send_command_to_minecraft(
+            f"execute at {player_name} run summon {mob_id} ~ ~ ~ {nbt}"
+        )
+        send_command_to_minecraft(
+            f'tellraw {player_name} [{{"text":"{mensagem}","color":"green"}}]'
+        )
+        await interaction.followup.send(
+            f"🐾 Um(a) **{tipo.name}** apareceu pertinho de `{player_name}`! (5 💎)"
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {safe_error_message(e)}")
+
+
+@bot.tree.command(name="foguete", description="Lança um foguetão no jogador (custa 1 diamante)")
+@app_commands.describe(player_name="Jogador a ser lançado")
+async def foguete(interaction: discord.Interaction, player_name: str):
+    await interaction.response.defer(thinking=True)
+    if not is_valid_player_name(player_name):
+        return await interaction.followup.send("❌ Nome de jogador inválido.")
+    ok, _, erro = await cobrar_diamantes(player_name, 1)
+    if not ok:
+        return await interaction.followup.send(erro)
+    try:
+        # slow_falling impede dano da queda; impulso vertical
+        send_command_to_minecraft(f"effect give {player_name} minecraft:slow_falling 30 0 true")
+        await asyncio.sleep(0.2)
+        # aplica motion via tag NBT (funciona em 1.20+)
+        send_command_to_minecraft(f"data merge entity {player_name} {{Motion:[0.0,3.0,0.0]}}")
+        send_command_to_minecraft(
+            f'tellraw {player_name} [{{"text":"🚀 LÁ VAI VOCÊ!","color":"red","bold":true}}]'
+        )
+        await interaction.followup.send(f"🚀 `{player_name}` foi lançado pro céu! (1 💎)")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erro: {safe_error_message(e)}")
 
 
 # ──────────────────────────────────────────────
