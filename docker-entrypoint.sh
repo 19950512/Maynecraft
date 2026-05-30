@@ -9,7 +9,7 @@ set -e
 # Define variáveis padrão
 MINECRAFT_DIR=${MINECRAFT_DIR:-/minecraft/server}
 TMUX_SESSION=${TMUX_SESSION:-minecraft}
-MINECRAFT_SERVER_URL=${MINECRAFT_SERVER_URL:-https://piston-data.mojang.com/v1/objects/4707d00eb834b446575d89a61a11b5d548d8c001/server.jar}
+MINECRAFT_SERVER_URL=${MINECRAFT_SERVER_URL:-https://piston-data.mojang.com/v1/objects/97ccd4c0ed3f81bbb7bfacddd1090b0c56f9bc51/server.jar}
 TEMPLATE_DIR=/minecraft/configs
 TARGET_PROPS="$MINECRAFT_DIR/server.properties"
 
